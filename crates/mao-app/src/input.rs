@@ -1,9 +1,12 @@
-//! Maps winit input to terminal input and app shortcuts.
+//! Maps winit input to app actions and terminal input.
 
 use mao_terminal::keys::{Key, Modifiers, NamedKey};
+use mao_ui::Direction;
 use winit::event::KeyEvent;
 use winit::keyboard::{Key as WKey, ModifiersState, NamedKey as WNamed};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+
+use crate::actions::Action;
 
 pub fn modifiers(state: ModifiersState) -> Modifiers {
     Modifiers {
@@ -13,40 +16,51 @@ pub fn modifiers(state: ModifiersState) -> Modifiers {
     }
 }
 
-/// App-level actions bound to keys. Resolved before anything reaches the PTY.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Shortcut {
-    Copy,
-    /// Copy if there is a selection, otherwise send Ctrl+C to the shell.
-    CopyOrInterrupt,
-    Paste,
-    ZoomIn,
-    ZoomOut,
-    ZoomReset,
-    ScrollPageUp,
-    ScrollPageDown,
-}
+/// Default keybindings. Resolved before anything reaches the PTY.
+pub fn action_for(event: &KeyEvent, mods: Modifiers) -> Option<Action> {
+    let Modifiers { shift, alt, ctrl } = mods;
+    let ctrl_shift = ctrl && shift && !alt;
+    let ctrl_only = ctrl && !shift && !alt;
+    let alt_only = alt && !ctrl && !shift;
+    let shift_only = shift && !ctrl && !alt;
 
-pub fn shortcut(event: &KeyEvent, mods: Modifiers) -> Option<Shortcut> {
-    let base = event.key_without_modifiers();
-    let ctrl_shift = mods.ctrl && mods.shift && !mods.alt;
-    let ctrl_only = mods.ctrl && !mods.shift && !mods.alt;
-    match &base {
+    match event.key_without_modifiers() {
         WKey::Character(c) => {
-            let c = c.as_str();
-            match () {
-                _ if ctrl_shift && c.eq_ignore_ascii_case("c") => Some(Shortcut::Copy),
-                _ if ctrl_shift && c.eq_ignore_ascii_case("v") => Some(Shortcut::Paste),
-                _ if ctrl_only && c.eq_ignore_ascii_case("c") => Some(Shortcut::CopyOrInterrupt),
-                _ if mods.ctrl && !mods.alt && (c == "=" || c == "+") => Some(Shortcut::ZoomIn),
-                _ if ctrl_only && c == "-" => Some(Shortcut::ZoomOut),
-                _ if ctrl_only && c == "0" => Some(Shortcut::ZoomReset),
-                _ => None,
-            }
+            let c = c.as_str().to_ascii_lowercase();
+            let action = match c.as_str() {
+                "p" if ctrl_shift => Action::CommandPalette,
+                "t" if ctrl_shift => Action::NewTab,
+                "w" if ctrl_shift => Action::ClosePane,
+                "d" if ctrl_shift => Action::SplitRight,
+                "e" if ctrl_shift => Action::SplitDown,
+                "c" if ctrl_shift => Action::Copy,
+                "v" if ctrl_shift => Action::Paste,
+                "c" if ctrl_only => Action::CopyOrInterrupt,
+                "=" | "+" if ctrl && !alt => Action::FontBigger,
+                "-" if ctrl_only => Action::FontSmaller,
+                "0" if ctrl_only => Action::FontReset,
+                d if alt_only && d.len() == 1 && ("1"..="9").contains(&d) => {
+                    Action::GoToTab(usize::from(d.as_bytes()[0] - b'1'))
+                }
+                _ => return None,
+            };
+            Some(action)
         }
-        WKey::Named(WNamed::Insert) if mods.shift && !mods.ctrl => Some(Shortcut::Paste),
-        WKey::Named(WNamed::PageUp) if mods.shift && !mods.ctrl => Some(Shortcut::ScrollPageUp),
-        WKey::Named(WNamed::PageDown) if mods.shift && !mods.ctrl => Some(Shortcut::ScrollPageDown),
+        WKey::Named(named) => Some(match named {
+            WNamed::Tab if ctrl_shift => Action::PrevTab,
+            WNamed::Tab if ctrl_only => Action::NextTab,
+            WNamed::Enter if ctrl_shift => Action::ToggleZoomPane,
+            WNamed::ArrowLeft if alt_only => Action::Focus(Direction::Left),
+            WNamed::ArrowRight if alt_only => Action::Focus(Direction::Right),
+            WNamed::ArrowUp if alt_only => Action::Focus(Direction::Up),
+            WNamed::ArrowDown if alt_only => Action::Focus(Direction::Down),
+            WNamed::Insert if shift_only => Action::Paste,
+            WNamed::PageUp if shift_only => Action::ScrollPageUp,
+            WNamed::PageDown if shift_only => Action::ScrollPageDown,
+            WNamed::Home if shift_only => Action::ScrollToTop,
+            WNamed::End if shift_only => Action::ScrollToBottom,
+            _ => return None,
+        }),
         _ => None,
     }
 }

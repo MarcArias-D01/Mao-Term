@@ -6,16 +6,22 @@
 mod color;
 mod grid;
 mod quad;
+mod ui;
 
-use glyphon::{
-    Cache, FontSystem, Resolution, SwashCache, TextAtlas, TextBounds, TextRenderer, Viewport,
-};
+use std::collections::HashMap;
+
+use glyphon::{Cache, FontSystem, Resolution, SwashCache, TextAtlas, TextRenderer, Viewport};
 
 pub use color::srgb_to_linear;
 pub use grid::{CellMetrics, CellStyle, Cursor, CursorShape, FontLoader, GridCell, Rgb8};
+pub use ui::{Align, UiFrame, UiRect, UiText};
+
+/// Identifies a terminal grid (one per pane).
+pub type GridId = u64;
 
 use grid::{Font, Grid};
 use quad::QuadPipeline;
+use ui::UiLayer;
 
 /// Errors raised while creating or using the renderer.
 #[derive(Debug, thiserror::Error)]
@@ -76,7 +82,11 @@ struct Text {
     swash: SwashCache,
     atlas: TextAtlas,
     viewport: Viewport,
+    /// Terminal grid text.
     renderer: TextRenderer,
+    /// UI text, drawn after the UI rectangles.
+    ui_renderer: TextRenderer,
+    ui: UiLayer,
 }
 
 /// Owns the wgpu device, the window surface and all render state.
@@ -92,7 +102,7 @@ pub struct Renderer {
     quads: QuadPipeline,
     text: Text,
     font: Font,
-    grid: Grid,
+    grids: HashMap<GridId, Grid>,
     /// Quad instances for the current frame (reused).
     instances: Vec<f32>,
 }
@@ -200,6 +210,9 @@ impl Renderer {
         let viewport = Viewport::new(&device, &cache);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let ui_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let ui = UiLayer::new(&font_system);
         let font = Font::new(&mut font_system, &font.family, font.size, font.scale);
         tracing::debug!(ms = t.elapsed().as_millis(), "startup: text pipeline ready");
 
@@ -218,9 +231,11 @@ impl Renderer {
                 atlas,
                 viewport,
                 renderer: text_renderer,
+                ui_renderer,
+                ui,
             },
             font,
-            grid: Grid::new(),
+            grids: HashMap::new(),
             instances: Vec::new(),
         })
     }
@@ -252,29 +267,61 @@ impl Renderer {
     pub fn set_font_size(&mut self, size_pt: f32, scale: f32) -> CellMetrics {
         self.font
             .set_size(&mut self.text.font_system, size_pt, scale);
-        self.grid.set_font(&self.font);
+        for grid in self.grids.values_mut() {
+            grid.set_font(&self.font);
+        }
         self.font.cell
     }
 
-    /// Places the grid at `origin` (pixels) with the given size in cells.
-    pub fn set_grid_layout(&mut self, origin: (f32, f32), cols: usize, rows: usize) {
-        if origin != self.grid.origin() {
-            self.grid.mark_all_dirty();
+    /// Places grid `id` (created on first use) at `origin` with the given size in
+    /// cells; its text is clipped to `clip` = `[x, y, w, h]` in pixels.
+    pub fn set_grid_layout(
+        &mut self,
+        id: GridId,
+        origin: (f32, f32),
+        cols: usize,
+        rows: usize,
+        clip: [f32; 4],
+    ) {
+        self.grids
+            .entry(id)
+            .or_insert_with(Grid::new)
+            .set_layout(&self.font, origin, cols, rows, clip);
+    }
+
+    /// Forgets a grid (its pane was closed).
+    pub fn remove_grid(&mut self, id: GridId) {
+        self.grids.remove(&id);
+    }
+
+    /// Marks every row of a grid for redraw (e.g. when its pane becomes visible again).
+    pub fn invalidate_grid(&mut self, id: GridId) {
+        if let Some(grid) = self.grids.get_mut(&id) {
+            grid.mark_all_dirty();
         }
-        self.grid.set_layout(&self.font, origin, cols, rows);
     }
 
-    /// Replaces the contents of one grid row.
-    pub fn set_row(&mut self, row: usize, cells: impl IntoIterator<Item = GridCell>) {
-        self.grid.set_row(row, cells);
+    /// Replaces the contents of one row of grid `id`.
+    pub fn set_row(&mut self, id: GridId, row: usize, cells: impl IntoIterator<Item = GridCell>) {
+        if let Some(grid) = self.grids.get_mut(&id) {
+            grid.set_row(row, cells);
+        }
     }
 
-    pub fn set_cursor(&mut self, cursor: Option<Cursor>) {
-        self.grid.set_cursor(cursor);
+    pub fn set_cursor(&mut self, id: GridId, cursor: Option<Cursor>) {
+        if let Some(grid) = self.grids.get_mut(&id) {
+            grid.set_cursor(cursor);
+        }
     }
 
-    /// Renders one frame on top of `background` (sRGB).
-    pub fn render(&mut self, background: Rgb8) -> Result<FrameOutcome, RenderError> {
+    /// Renders one frame: `background` (sRGB) clear, then the listed grids,
+    /// then the UI layer on top.
+    pub fn render(
+        &mut self,
+        background: Rgb8,
+        visible_grids: &[GridId],
+        ui: &UiFrame,
+    ) -> Result<FrameOutcome, RenderError> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -297,7 +344,9 @@ impl Renderer {
                     .create_surface((self.surface_target)())
                     .map_err(|_| RenderError::SurfaceLost)?;
                 self.surface.configure(&self.device, &self.config);
-                self.grid.mark_all_dirty();
+                for grid in self.grids.values_mut() {
+                    grid.mark_all_dirty();
+                }
                 return Ok(FrameOutcome::Retry);
             }
         };
@@ -309,34 +358,58 @@ impl Renderer {
             atlas,
             viewport,
             renderer,
+            ui_renderer,
+            ui: ui_layer,
         } = &mut self.text;
 
-        // Grid: reshape dirty rows, gather quads and text.
-        self.grid
-            .update(font_system, &self.font, background, self.srgb);
+        // Grids: reshape dirty rows, gather quads. UI quads come after them.
         self.instances.clear();
-        self.grid
-            .collect_quads(&self.font, self.srgb, &mut self.instances);
+        for id in visible_grids {
+            if let Some(grid) = self.grids.get_mut(id) {
+                grid.update(font_system, &self.font, background, self.srgb);
+                grid.collect_quads(&self.font, self.srgb, &mut self.instances);
+            }
+        }
+        let grid_quads = (self.instances.len() / quad::FLOATS_PER_QUAD) as u32;
+        ui_layer.update(
+            font_system,
+            self.font.family(),
+            ui,
+            self.srgb,
+            &mut self.instances,
+        );
+        let all_quads = (self.instances.len() / quad::FLOATS_PER_QUAD) as u32;
         self.quads
             .prepare(&self.device, &self.queue, (width, height), &self.instances);
 
         viewport.update(&self.queue, Resolution { width, height });
-        let bounds = TextBounds {
-            left: 0,
-            top: 0,
-            right: width as i32,
-            bottom: height as i32,
-        };
+        let grids = &self.grids;
+        let font = &self.font;
+        let grid_areas = visible_grids
+            .iter()
+            .filter_map(|id| grids.get(id))
+            .flat_map(|grid| grid.text_areas(font));
         if let Err(e) = renderer.prepare(
             &self.device,
             &self.queue,
             font_system,
             atlas,
             viewport,
-            self.grid.text_areas(&self.font, bounds),
+            grid_areas,
             swash,
         ) {
-            tracing::error!("text prepare failed: {e}");
+            tracing::error!("grid text prepare failed: {e}");
+        }
+        if let Err(e) = ui_renderer.prepare(
+            &self.device,
+            &self.queue,
+            font_system,
+            atlas,
+            viewport,
+            ui_layer.text_areas(ui),
+            swash,
+        ) {
+            tracing::error!("UI text prepare failed: {e}");
         }
 
         let view = frame
@@ -367,9 +440,13 @@ impl Renderer {
                 })],
                 ..Default::default()
             });
-            self.quads.draw(&mut pass);
+            self.quads.draw(&mut pass, 0..grid_quads);
             if let Err(e) = renderer.render(atlas, viewport, &mut pass) {
-                tracing::error!("text render failed: {e}");
+                tracing::error!("grid text render failed: {e}");
+            }
+            self.quads.draw(&mut pass, grid_quads..all_quads);
+            if let Err(e) = ui_renderer.render(atlas, viewport, &mut pass) {
+                tracing::error!("UI text render failed: {e}");
             }
         }
         self.queue.submit(std::iter::once(encoder.finish()));

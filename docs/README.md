@@ -15,7 +15,7 @@
 |---|---|---|
 | [terminal-core](specs/terminal-core.md) | M1 | In progress |
 | [renderer](specs/renderer.md) | M0–M1 | In progress |
-| [workspace-layout](specs/workspace-layout.md) | M2 | Draft |
+| [workspace-layout](specs/workspace-layout.md) | M2 | In progress |
 | [shell-integration](specs/shell-integration.md) | M3 | Draft |
 | [input-autocomplete](specs/input-autocomplete.md) | M3 | Draft |
 | [file-tree](specs/file-tree.md) | M4 | Draft |

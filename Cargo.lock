@@ -1076,6 +1076,7 @@ dependencies = [
  "mao-config",
  "mao-render",
  "mao-terminal",
+ "mao-ui",
  "tracing",
  "tracing-subscriber",
  "winit",

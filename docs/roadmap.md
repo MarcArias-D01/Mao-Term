@@ -45,12 +45,15 @@ Cold start (first launch after build) ~300–500 ms due to driver shader caches.
 
 Next steps for startup: create the GPU device in parallel with window creation and shell spawn; cache compiled pipelines. Next step for throughput: evaluate shipping the newer `conpty.dll`/`OpenConsole.exe` from Windows Terminal (as WezTerm does).
 
-## M2 — Multi-terminal ⬜
+## M2 — Multi-terminal 🟨
 
-- ⬜ Tabs (create, close, move, rename).
-- ⬜ Horizontal/vertical splits, resize, keyboard focus movement.
-- ⬜ Command palette (`Ctrl+Shift+P`).
-- ⬜ Basic status bar (cwd).
+- ✅ Tabs: create (`Ctrl+Shift+T`, `+`), close (`×`, middle click, `Ctrl+Shift+W` on the last pane), switch (click, `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Alt+1…9`), activity dot for background output.
+- ✅ Splits right/down (`Ctrl+Shift+D/E`), drag dividers to resize (PTYs follow), focus with `Alt+Arrows` or click, maximize pane (`Ctrl+Shift+Enter`).
+- ✅ Command palette (`Ctrl+Shift+P`) with fuzzy search over every action, keyboard and mouse.
+- ✅ Basic status bar: focused pane title, tab/pane position, grid size.
+- ⬜ Rename tabs, reorder tabs by dragging.
+- ⬜ New tab/pane inherits the cwd (needs shell integration, M3).
+- ⬜ Restore tabs/splits on restart (optional).
 
 ## M3 — Shell integration + autocomplete ⬜
 

@@ -42,8 +42,8 @@ shell-integration/
 Dependency rules:
 
 - `mao-app` depends on everything; **no crate depends on `mao-app`**.
-- `mao-render` knows nothing about terminals or widgets: it receives a **draw list** (`DrawList`: rects, text, images).
-- `mao-ui` produces a `DrawList`; it does not touch wgpu.
+- `mao-render` knows nothing about terminals or widgets. It draws **grids** of resolved cells (one per pane, keyed by `GridId`, each with its own per-row caches and clip rect) and a **UI layer** (`UiFrame`: rects + cached text labels) on top.
+- `mao-ui` holds pure UI logic (geometry, split tree, focus navigation, fuzzy search); it does not touch wgpu. `mao-app` turns it into a `UiFrame` (`chrome.rs`).
 - Domain crates (`terminal`, `complete`, `fs`, `docs`, `agents`, `sysmon`) don't depend on `render` or `ui` → testable without a GPU.
 
 ## Window structure

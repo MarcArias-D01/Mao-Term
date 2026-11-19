@@ -125,14 +125,16 @@ impl QuadPipeline {
         self.count = quads as u32;
     }
 
-    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        if self.count == 0 {
+    /// Draws the instances in `range` (indices into this frame's quads).
+    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, range: std::ops::Range<u32>) {
+        let range = range.start.min(self.count)..range.end.min(self.count);
+        if range.is_empty() {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.instances.slice(..));
-        pass.draw(0..4, 0..self.count);
+        pass.draw(0..4, range);
     }
 }
 

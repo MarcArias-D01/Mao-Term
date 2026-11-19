@@ -1,6 +1,6 @@
 # Spec: Workspace — tabs, splits, sidebar and palette
 
-- **Status:** Draft
+- **Status:** In progress
 - **Milestone:** M2 (sidebar in M4)
 - **Crates:** `mao-ui`, `mao-app`
 - **Related:** [file-tree](file-tree.md), [agents-panel](agents-panel.md), [system-monitor](system-monitor.md)

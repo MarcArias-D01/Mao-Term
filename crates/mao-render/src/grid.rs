@@ -140,6 +140,11 @@ impl Font {
         self.size_pt
     }
 
+    /// Resolved family name (`None` = generic monospace).
+    pub(crate) fn family(&self) -> Option<&str> {
+        self.family.as_deref()
+    }
+
     fn attrs(&self) -> Attrs<'_> {
         let family = match &self.family {
             Some(name) => Family::Name(name),
@@ -230,6 +235,8 @@ pub(crate) struct Grid {
     rows: Vec<Row>,
     cols: usize,
     origin: (f32, f32),
+    /// Text is clipped to this rectangle (the pane), in pixels.
+    clip: glyphon::TextBounds,
     cursor: Option<Cursor>,
     // Scratch buffers reused across row rebuilds.
     text: String,
@@ -242,18 +249,32 @@ impl Grid {
             rows: Vec::new(),
             cols: 0,
             origin: (0.0, 0.0),
+            clip: glyphon::TextBounds::default(),
             cursor: None,
             text: String::new(),
             spans: Vec::new(),
         }
     }
 
-    pub(crate) fn origin(&self) -> (f32, f32) {
-        self.origin
-    }
-
-    pub(crate) fn set_layout(&mut self, font: &Font, origin: (f32, f32), cols: usize, rows: usize) {
+    pub(crate) fn set_layout(
+        &mut self,
+        font: &Font,
+        origin: (f32, f32),
+        cols: usize,
+        rows: usize,
+        clip: [f32; 4],
+    ) {
+        if origin != self.origin {
+            // Quads hold absolute positions.
+            self.mark_all_dirty();
+        }
         self.origin = origin;
+        self.clip = glyphon::TextBounds {
+            left: clip[0] as i32,
+            top: clip[1] as i32,
+            right: (clip[0] + clip[2]) as i32,
+            bottom: (clip[1] + clip[3]) as i32,
+        };
         if cols != self.cols {
             self.cols = cols;
             for row in &mut self.rows {
@@ -429,12 +450,9 @@ impl Grid {
         }
     }
 
-    /// Text areas for every row.
-    pub(crate) fn text_areas(
-        &self,
-        font: &Font,
-        bounds: glyphon::TextBounds,
-    ) -> impl Iterator<Item = glyphon::TextArea<'_>> {
+    /// Text areas for every row, clipped to the grid's rectangle.
+    pub(crate) fn text_areas(&self, font: &Font) -> impl Iterator<Item = glyphon::TextArea<'_>> {
+        let bounds = self.clip;
         let (ox, oy) = self.origin;
         let height = font.cell.height;
         self.rows

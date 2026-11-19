@@ -17,6 +17,7 @@ arboard = "3.7.0"
 mao-config.workspace = true
 mao-render.workspace = true
 mao-terminal.workspace = true
+mao-ui.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 winit.workspace = true
