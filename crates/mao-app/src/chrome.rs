@@ -5,6 +5,7 @@ use mao_config::ThemeConfig;
 use mao_render::{Align, Rgb8, UiFrame, UiText};
 use mao_ui::{Divider, PaneId, Rect};
 
+use crate::editor::{MENU_ROWS, Menu};
 use crate::palette::{MAX_VISIBLE, Palette};
 use crate::workspace::Workspace;
 
@@ -161,6 +162,8 @@ pub struct Colors {
     hover: Rgb8,
     divider: Rgb8,
     raised: Rgb8,
+    branch: Rgb8,
+    option: Rgb8,
 }
 
 impl Colors {
@@ -178,6 +181,8 @@ impl Colors {
             hover: mix(chrome, fg, 0.07),
             divider: mix(bg, fg, 0.16),
             raised: mix(bg, fg, 0.06),
+            branch: theme.ansi[10].to_array(),
+            option: theme.ansi[14].to_array(),
         }
     }
 }
@@ -195,6 +200,20 @@ const KEY_STATUS: u64 = 4 << 48;
 const KEY_PALETTE: u64 = 5 << 48;
 const KEY_PALETTE_ROW: u64 = 6 << 48;
 const KEY_PALETTE_SHORTCUT: u64 = 7 << 48;
+const KEY_MENU_LABEL: u64 = 8 << 48;
+const KEY_MENU_DETAIL: u64 = 9 << 48;
+const KEY_MENU_COUNT: u64 = 10 << 48;
+
+/// The completion menu of the focused pane and where to put it.
+pub struct MenuView<'a> {
+    pub menu: &'a Menu,
+    /// Left edge (the completed token's first cell).
+    pub x: f32,
+    /// Top of the row below the caret.
+    pub below: f32,
+    /// Top of the caret row (the menu goes above it if there's no room below).
+    pub above: f32,
+}
 
 pub struct DrawState<'a> {
     pub layout: &'a Layout,
@@ -204,6 +223,7 @@ pub struct DrawState<'a> {
     pub palette: Option<&'a Palette>,
     pub hover: &'a Hit,
     pub window_focused: bool,
+    pub menu: Option<MenuView<'a>>,
 }
 
 pub fn draw(ui: &mut UiFrame, s: &DrawState<'_>) {
@@ -211,6 +231,9 @@ pub fn draw(ui: &mut UiFrame, s: &DrawState<'_>) {
     draw_tab_bar(ui, s);
     draw_panes_decor(ui, s);
     draw_status(ui, s);
+    if let Some(menu) = &s.menu {
+        draw_menu(ui, s, menu);
+    }
     if let Some(p) = s.palette {
         draw_palette(ui, s, p);
     }
@@ -268,7 +291,7 @@ fn draw_tab_bar(ui: &mut UiFrame, s: &DrawState<'_>) {
         let title = ws
             .panes
             .get(&tab.focused)
-            .map_or("shell", |p| p.short_title());
+            .map_or_else(|| "shell".to_owned(), |p| p.display_name());
         let pad = m.px(14.0);
         let mut text_x = r.x + pad;
         if tab.activity && !active {
@@ -281,7 +304,7 @@ fn draw_tab_bar(ui: &mut UiFrame, s: &DrawState<'_>) {
         } else if tab.tree.len() > 1 {
             format!("{title} +{}", tab.tree.len() - 1)
         } else {
-            title.to_owned()
+            title.clone()
         };
         let text_w = (l.closes[i].x - text_x).max(0.0);
         let color = if active { c.fg } else { c.dim };
@@ -370,7 +393,16 @@ fn draw_status(ui: &mut UiFrame, s: &DrawState<'_>) {
     let inner = Rect::new(r.x + pad, r.y, (r.w - 2.0 * pad).max(0.0), r.h);
     let size = m.ui_text * 0.92;
 
-    let left = ws.focused_pane().map_or(String::new(), |p| p.title.clone());
+    let left = ws.focused_pane().map_or(String::new(), |p| {
+        let place = p
+            .cwd
+            .as_ref()
+            .map_or_else(|| p.title.clone(), |c| c.display().to_string());
+        match p.last_exit {
+            Some(code) if code != 0 => format!("{place}   ✗ exit {code}"),
+            _ => place,
+        }
+    });
     ui.texts.push(text(
         KEY_STATUS,
         left,
@@ -410,6 +442,82 @@ fn draw_status(ui: &mut UiFrame, s: &DrawState<'_>) {
         c.dim,
         Align::Right,
     ));
+}
+
+fn draw_menu(ui: &mut UiFrame, s: &DrawState<'_>, v: &MenuView<'_>) {
+    let (m, c, l) = (s.metrics, s.colors, s.layout);
+    let items = &v.menu.completions.items;
+    if items.is_empty() {
+        return;
+    }
+    let rows = items.len().min(MENU_ROWS);
+    let row_h = m.px(26.0);
+    let footer = if items.len() > MENU_ROWS {
+        m.px(22.0)
+    } else {
+        0.0
+    };
+    let pad = m.px(4.0);
+    let h = rows as f32 * row_h + 2.0 * pad + footer;
+    let w = m.px(440.0).min(l.content.w - m.px(16.0)).max(m.px(120.0));
+    // Align the labels (inset by `pad` + 8px) with the token being completed.
+    let x = (v.x - pad - m.px(8.0))
+        .min(l.content.right() - w - m.px(8.0))
+        .max(l.content.x + m.px(4.0));
+    let y = if v.below + h <= l.content.bottom() {
+        v.below + m.px(2.0)
+    } else {
+        (v.above - h - m.px(2.0)).max(l.content.y)
+    };
+    let b = m.gap;
+    ui.rect(x - b, y - b, w + 2.0 * b, h + 2.0 * b, c.divider);
+    ui.rect(x, y, w, h, c.raised);
+
+    let start = v.menu.scroll.min(items.len().saturating_sub(rows));
+    for (i, item) in items.iter().enumerate().skip(start).take(rows) {
+        let ry = y + pad + (i - start) as f32 * row_h;
+        let row = Rect::new(x + pad, ry, w - 2.0 * pad, row_h);
+        if i == v.menu.selected {
+            ui.rect(row.x, row.y, row.w, row.h, c.selection);
+        }
+        let color = match item.kind {
+            mao_complete::ItemKind::Directory => c.accent,
+            mao_complete::ItemKind::Branch => c.branch,
+            mao_complete::ItemKind::Option => c.option,
+            _ => c.fg,
+        };
+        let inner = Rect::new(row.x + m.px(8.0), row.y, row.w - m.px(16.0), row.h);
+        let label_w = inner.w * 0.62;
+        let mut label = text(
+            KEY_MENU_LABEL | (i - start) as u64,
+            item.label.clone(),
+            Rect::new(inner.x, inner.y, label_w, inner.h),
+            m.ui_text,
+            color,
+            Align::Left,
+        );
+        label.mono = true;
+        ui.texts.push(label);
+        ui.texts.push(text(
+            KEY_MENU_DETAIL | (i - start) as u64,
+            item.detail.clone(),
+            Rect::new(inner.x + label_w, inner.y, inner.w - label_w, inner.h),
+            m.ui_text * 0.88,
+            c.dim,
+            Align::Right,
+        ));
+    }
+    if footer > 0.0 {
+        let fy = y + pad + rows as f32 * row_h;
+        ui.texts.push(text(
+            KEY_MENU_COUNT,
+            format!("{}/{}", v.menu.selected + 1, items.len()),
+            Rect::new(x + m.px(12.0), fy, w - m.px(24.0), footer),
+            m.ui_text * 0.85,
+            c.dim,
+            Align::Right,
+        ));
+    }
 }
 
 /// Palette box geometry, shared by drawing and hit-testing.

@@ -1,6 +1,6 @@
 # ADR 0002 — Native input editor for autocomplete
 
-- **Status:** Proposed (validate in M3)
+- **Status:** Accepted (validated in M3 with PowerShell)
 - **Date:** 2026-11-19
 
 ## Context
@@ -28,4 +28,5 @@ Without shell integration, Mao-Term behaves as a classic terminal (always passth
 - ✅ Instant suggestions with no round-trips to the shell.
 - ❌ We must reimplement line-editor basics (word movement, history, selection, multiline).
 - ❌ Shell-specific features (zle widgets, custom PSReadLine bindings) don't apply in editor mode. The editor can be disabled per profile.
-- ⚠️ The shell echoes the submitted command: verify in M3 that the result looks clean (options: hide the echo line, or suppress it from the integration script).
+- ✅ The shell echoes the submitted command: in practice this looks exactly like a normal shell (the editor overlay disappears and the shell prints the command where it was typed).
+- ⚠️ PSReadLine's own features (predictions, custom key handlers) don't apply in editor mode.

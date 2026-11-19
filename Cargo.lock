@@ -1073,18 +1073,26 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "mao-complete",
  "mao-config",
+ "mao-input",
  "mao-render",
  "mao-terminal",
  "mao-ui",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
  "winit",
 ]
 
 [[package]]
 name = "mao-complete"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
+ "tracing",
+]
 
 [[package]]
 name = "mao-config"
@@ -1118,6 +1126,7 @@ dependencies = [
  "pollster",
  "thiserror 2.0.21",
  "tracing",
+ "unicode-width",
  "wgpu",
 ]
 
@@ -1130,6 +1139,7 @@ name = "mao-terminal"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "polling",
  "thiserror 2.0.21",
  "tracing",
 ]

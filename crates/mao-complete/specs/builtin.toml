@@ -1,0 +1,554 @@
+# Built-in completion specs. Format: docs/specs/input-autocomplete.md.
+# args: any (default, offers paths) | path | dir | branch | none
+
+[[spec]]
+name = "cd"
+aliases = ["Set-Location", "sl", "chdir", "pushd", "z"]
+description = "Change directory"
+args = "dir"
+
+[[spec]]
+name = "code"
+description = "Open in VS Code"
+args = "path"
+
+# ───────────────────────── git ─────────────────────────
+[[spec]]
+name = "git"
+description = "Version control"
+args = "none"
+
+[[spec.option]]
+names = ["--version"]
+description = "Print the git version"
+
+[[spec.option]]
+names = ["-C"]
+description = "Run as if started in <path>"
+
+[[spec.sub]]
+name = "status"
+description = "Show the working tree status"
+args = "path"
+[[spec.sub.option]]
+names = ["-s", "--short"]
+description = "Short format"
+[[spec.sub.option]]
+names = ["-b", "--branch"]
+description = "Show branch info"
+
+[[spec.sub]]
+name = "add"
+description = "Add file contents to the index"
+args = "path"
+[[spec.sub.option]]
+names = ["-A", "--all"]
+description = "Add all changes"
+[[spec.sub.option]]
+names = ["-p", "--patch"]
+description = "Choose hunks interactively"
+
+[[spec.sub]]
+name = "commit"
+description = "Record changes to the repository"
+args = "path"
+[[spec.sub.option]]
+names = ["-m", "--message"]
+description = "Commit message"
+[[spec.sub.option]]
+names = ["-a", "--all"]
+description = "Stage modified and deleted files"
+[[spec.sub.option]]
+names = ["--amend"]
+description = "Amend the previous commit"
+
+[[spec.sub]]
+name = "checkout"
+description = "Switch branches or restore files"
+args = "branch"
+[[spec.sub.option]]
+names = ["-b"]
+description = "Create and switch to a new branch"
+
+[[spec.sub]]
+name = "switch"
+description = "Switch branches"
+args = "branch"
+[[spec.sub.option]]
+names = ["-c", "--create"]
+description = "Create a new branch"
+
+[[spec.sub]]
+name = "branch"
+description = "List, create or delete branches"
+args = "branch"
+[[spec.sub.option]]
+names = ["-d", "--delete"]
+description = "Delete a branch"
+[[spec.sub.option]]
+names = ["-a", "--all"]
+description = "List local and remote branches"
+
+[[spec.sub]]
+name = "merge"
+description = "Join histories together"
+args = "branch"
+
+[[spec.sub]]
+name = "rebase"
+description = "Reapply commits on top of another base"
+args = "branch"
+[[spec.sub.option]]
+names = ["-i", "--interactive"]
+description = "Interactive rebase"
+[[spec.sub.option]]
+names = ["--continue"]
+description = "Continue after resolving conflicts"
+[[spec.sub.option]]
+names = ["--abort"]
+description = "Abort the rebase"
+
+[[spec.sub]]
+name = "pull"
+description = "Fetch and integrate"
+args = "none"
+[[spec.sub.option]]
+names = ["--rebase"]
+description = "Rebase instead of merge"
+
+[[spec.sub]]
+name = "push"
+description = "Update remote refs"
+args = "branch"
+[[spec.sub.option]]
+names = ["-u", "--set-upstream"]
+description = "Set upstream"
+[[spec.sub.option]]
+names = ["--force-with-lease"]
+description = "Force push safely"
+
+[[spec.sub]]
+name = "fetch"
+description = "Download objects and refs"
+args = "none"
+[[spec.sub.option]]
+names = ["--all"]
+description = "Fetch all remotes"
+[[spec.sub.option]]
+names = ["-p", "--prune"]
+description = "Prune deleted remote branches"
+
+[[spec.sub]]
+name = "log"
+description = "Show commit logs"
+args = "branch"
+[[spec.sub.option]]
+names = ["--oneline"]
+description = "One line per commit"
+[[spec.sub.option]]
+names = ["--graph"]
+description = "Draw the history graph"
+
+[[spec.sub]]
+name = "diff"
+description = "Show changes"
+args = "path"
+[[spec.sub.option]]
+names = ["--staged", "--cached"]
+description = "Changes in the index"
+
+[[spec.sub]]
+name = "restore"
+description = "Restore working tree files"
+args = "path"
+[[spec.sub.option]]
+names = ["--staged"]
+description = "Unstage"
+
+[[spec.sub]]
+name = "reset"
+description = "Reset HEAD to a state"
+args = "branch"
+[[spec.sub.option]]
+names = ["--hard"]
+description = "Discard working tree changes"
+[[spec.sub.option]]
+names = ["--soft"]
+description = "Keep changes staged"
+
+[[spec.sub]]
+name = "stash"
+description = "Stash changes"
+args = "none"
+[[spec.sub.sub]]
+name = "pop"
+description = "Apply and drop the latest stash"
+[[spec.sub.sub]]
+name = "list"
+description = "List stashes"
+[[spec.sub.sub]]
+name = "apply"
+description = "Apply a stash"
+
+[[spec.sub]]
+name = "clone"
+description = "Clone a repository"
+args = "none"
+
+[[spec.sub]]
+name = "init"
+description = "Create an empty repository"
+args = "dir"
+
+[[spec.sub]]
+name = "remote"
+description = "Manage remotes"
+args = "none"
+[[spec.sub.option]]
+names = ["-v", "--verbose"]
+description = "Show URLs"
+
+[[spec.sub]]
+name = "tag"
+description = "Manage tags"
+args = "none"
+
+[[spec.sub]]
+name = "cherry-pick"
+description = "Apply commits from elsewhere"
+args = "branch"
+
+[[spec.sub]]
+name = "show"
+description = "Show objects"
+args = "branch"
+
+# ───────────────────────── cargo ─────────────────────────
+[[spec]]
+name = "cargo"
+description = "Rust package manager"
+args = "none"
+
+[[spec.sub]]
+name = "build"
+aliases = ["b"]
+description = "Compile the package"
+args = "none"
+[[spec.sub.option]]
+names = ["-r", "--release"]
+description = "Optimized build"
+[[spec.sub.option]]
+names = ["-p", "--package"]
+description = "Package to build"
+[[spec.sub.option]]
+names = ["--workspace"]
+description = "Build all workspace members"
+
+[[spec.sub]]
+name = "run"
+aliases = ["r"]
+description = "Run a binary"
+args = "none"
+[[spec.sub.option]]
+names = ["-r", "--release"]
+description = "Optimized build"
+[[spec.sub.option]]
+names = ["-p", "--package"]
+description = "Package to run"
+[[spec.sub.option]]
+names = ["--bin"]
+description = "Binary to run"
+
+[[spec.sub]]
+name = "test"
+aliases = ["t"]
+description = "Run tests"
+args = "none"
+[[spec.sub.option]]
+names = ["--workspace"]
+description = "Test all workspace members"
+[[spec.sub.option]]
+names = ["-p", "--package"]
+description = "Package to test"
+
+[[spec.sub]]
+name = "check"
+aliases = ["c"]
+description = "Check without building"
+args = "none"
+
+[[spec.sub]]
+name = "clippy"
+description = "Run lints"
+args = "none"
+[[spec.sub.option]]
+names = ["--all-targets"]
+description = "Lint all targets"
+[[spec.sub.option]]
+names = ["--fix"]
+description = "Apply suggestions"
+
+[[spec.sub]]
+name = "fmt"
+description = "Format the code"
+args = "none"
+
+[[spec.sub]]
+name = "add"
+description = "Add a dependency"
+args = "none"
+
+[[spec.sub]]
+name = "remove"
+aliases = ["rm"]
+description = "Remove a dependency"
+args = "none"
+
+[[spec.sub]]
+name = "update"
+description = "Update dependencies"
+args = "none"
+
+[[spec.sub]]
+name = "new"
+description = "Create a new package"
+args = "dir"
+
+[[spec.sub]]
+name = "init"
+description = "Create a package in an existing directory"
+args = "dir"
+
+[[spec.sub]]
+name = "doc"
+description = "Build documentation"
+args = "none"
+[[spec.sub.option]]
+names = ["--open"]
+description = "Open in the browser"
+
+[[spec.sub]]
+name = "clean"
+description = "Remove build artifacts"
+args = "none"
+
+[[spec.sub]]
+name = "install"
+description = "Install a binary"
+args = "none"
+
+[[spec.sub]]
+name = "tree"
+description = "Show the dependency tree"
+args = "none"
+
+[[spec.sub]]
+name = "bench"
+description = "Run benchmarks"
+args = "none"
+
+[[spec.sub]]
+name = "publish"
+description = "Publish to crates.io"
+args = "none"
+
+# ───────────────────────── npm ─────────────────────────
+[[spec]]
+name = "npm"
+description = "Node package manager"
+args = "none"
+
+[[spec.sub]]
+name = "install"
+aliases = ["i"]
+description = "Install dependencies"
+args = "none"
+[[spec.sub.option]]
+names = ["-D", "--save-dev"]
+description = "Save as dev dependency"
+[[spec.sub.option]]
+names = ["-g", "--global"]
+description = "Install globally"
+
+[[spec.sub]]
+name = "run"
+description = "Run a package script"
+args = "none"
+
+[[spec.sub]]
+name = "test"
+aliases = ["t"]
+description = "Run tests"
+args = "none"
+
+[[spec.sub]]
+name = "start"
+description = "Run the start script"
+args = "none"
+
+[[spec.sub]]
+name = "init"
+description = "Create package.json"
+args = "none"
+
+[[spec.sub]]
+name = "uninstall"
+aliases = ["rm", "un"]
+description = "Remove a package"
+args = "none"
+
+[[spec.sub]]
+name = "update"
+description = "Update packages"
+args = "none"
+
+[[spec.sub]]
+name = "outdated"
+description = "Check for outdated packages"
+args = "none"
+
+[[spec.sub]]
+name = "publish"
+description = "Publish a package"
+args = "none"
+
+[[spec.sub]]
+name = "ci"
+description = "Clean install from the lockfile"
+args = "none"
+
+# ───────────────────────── docker ─────────────────────────
+[[spec]]
+name = "docker"
+description = "Containers"
+args = "none"
+
+[[spec.sub]]
+name = "ps"
+description = "List containers"
+args = "none"
+[[spec.sub.option]]
+names = ["-a", "--all"]
+description = "Show all containers"
+
+[[spec.sub]]
+name = "run"
+description = "Run a container"
+args = "none"
+[[spec.sub.option]]
+names = ["-d", "--detach"]
+description = "Run in the background"
+[[spec.sub.option]]
+names = ["-it"]
+description = "Interactive with a TTY"
+[[spec.sub.option]]
+names = ["--rm"]
+description = "Remove when it exits"
+[[spec.sub.option]]
+names = ["-p", "--publish"]
+description = "Publish a port"
+[[spec.sub.option]]
+names = ["-v", "--volume"]
+description = "Bind mount a volume"
+
+[[spec.sub]]
+name = "build"
+description = "Build an image"
+args = "dir"
+[[spec.sub.option]]
+names = ["-t", "--tag"]
+description = "Image name and tag"
+
+[[spec.sub]]
+name = "exec"
+description = "Run a command in a container"
+args = "none"
+
+[[spec.sub]]
+name = "images"
+description = "List images"
+args = "none"
+
+[[spec.sub]]
+name = "logs"
+description = "Fetch container logs"
+args = "none"
+[[spec.sub.option]]
+names = ["-f", "--follow"]
+description = "Follow output"
+
+[[spec.sub]]
+name = "stop"
+description = "Stop containers"
+args = "none"
+
+[[spec.sub]]
+name = "rm"
+description = "Remove containers"
+args = "none"
+
+[[spec.sub]]
+name = "pull"
+description = "Pull an image"
+args = "none"
+
+[[spec.sub]]
+name = "compose"
+description = "Multi-container apps"
+args = "none"
+[[spec.sub.sub]]
+name = "up"
+description = "Create and start services"
+[[spec.sub.sub]]
+name = "down"
+description = "Stop and remove services"
+[[spec.sub.sub]]
+name = "logs"
+description = "View service logs"
+[[spec.sub.sub]]
+name = "ps"
+description = "List services"
+
+# ───────────────────────── winget ─────────────────────────
+[[spec]]
+name = "winget"
+description = "Windows package manager"
+args = "none"
+
+[[spec.sub]]
+name = "install"
+aliases = ["add"]
+description = "Install a package"
+args = "none"
+
+[[spec.sub]]
+name = "search"
+aliases = ["find"]
+description = "Search packages"
+args = "none"
+
+[[spec.sub]]
+name = "upgrade"
+aliases = ["update"]
+description = "Upgrade packages"
+args = "none"
+[[spec.sub.option]]
+names = ["--all"]
+description = "Upgrade everything"
+
+[[spec.sub]]
+name = "uninstall"
+aliases = ["remove", "rm"]
+description = "Uninstall a package"
+args = "none"
+
+[[spec.sub]]
+name = "list"
+aliases = ["ls"]
+description = "List installed packages"
+args = "none"
+
+[[spec.sub]]
+name = "show"
+description = "Show package details"
+args = "none"

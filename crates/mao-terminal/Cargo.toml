@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 alacritty_terminal = "0.26"
+polling = "3.11"
 thiserror.workspace = true
 tracing.workspace = true
 

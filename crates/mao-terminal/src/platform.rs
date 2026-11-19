@@ -1,24 +1,26 @@
 //! OS-specific helpers. See `docs/skills/cross-platform/SKILL.md`.
 
-use alacritty_terminal::tty::Shell;
-
-/// Default shell when none is configured.
+/// Default shell (program and arguments) when none is configured.
 ///
 /// Windows: `pwsh` (PowerShell 7) if found on `PATH`, else `powershell`.
-/// Unix: `None`, letting the PTY layer use `$SHELL` / the passwd entry.
+/// Unix: `$SHELL`, else `/bin/bash`.
 #[cfg(windows)]
-pub fn default_shell() -> Option<Shell> {
+pub fn default_shell() -> (String, Vec<String>) {
     let program = if find_in_path("pwsh.exe") {
         "pwsh.exe"
     } else {
         "powershell.exe"
     };
-    Some(Shell::new(program.to_owned(), vec!["-NoLogo".to_owned()]))
+    (program.to_owned(), vec!["-NoLogo".to_owned()])
 }
 
 #[cfg(not(windows))]
-pub fn default_shell() -> Option<Shell> {
-    None
+pub fn default_shell() -> (String, Vec<String>) {
+    let program = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/bash".to_owned());
+    (program, Vec::new())
 }
 
 #[cfg(windows)]

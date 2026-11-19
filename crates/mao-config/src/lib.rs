@@ -40,6 +40,7 @@ pub struct Config {
     pub window: WindowConfig,
     pub terminal: TerminalConfig,
     pub shell: ShellConfig,
+    pub input: InputConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -121,11 +122,42 @@ impl Default for TerminalConfig {
 
 /// Shell to launch. When `program` is unset the OS default is used
 /// (`pwsh` → `powershell` on Windows, `$SHELL` on Linux).
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ShellConfig {
     pub program: Option<String>,
     pub args: Vec<String>,
+    /// Load Mao-Term's shell integration (prompt marks, cwd) automatically.
+    pub integration: bool,
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        Self {
+            program: None,
+            args: Vec::new(),
+            integration: true,
+        }
+    }
+}
+
+/// The native input editor used at the shell prompt (ADR 0002).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InputConfig {
+    /// Edit commands in Mao-Term's editor (needs shell integration).
+    pub editor: bool,
+    /// Show history suggestions as ghost text while typing.
+    pub suggestions: bool,
+}
+
+impl Default for InputConfig {
+    fn default() -> Self {
+        Self {
+            editor: true,
+            suggestions: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -194,6 +226,12 @@ impl Config {
 /// `%APPDATA%\mao-term\config` on Windows, `$XDG_CONFIG_HOME/mao-term` on Linux.
 pub fn config_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "mao-term").map(|d| d.config_dir().to_owned())
+}
+
+/// Directory for data Mao-Term manages (history, shell-integration scripts):
+/// `%LOCALAPPDATA%\mao-term\data` on Windows, `$XDG_DATA_HOME/mao-term` on Linux.
+pub fn data_dir() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "mao-term").map(|d| d.data_local_dir().to_owned())
 }
 
 /// Full path of the user config file.

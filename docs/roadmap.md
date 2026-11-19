@@ -52,15 +52,22 @@ Next steps for startup: create the GPU device in parallel with window creation a
 - ✅ Command palette (`Ctrl+Shift+P`) with fuzzy search over every action, keyboard and mouse.
 - ✅ Basic status bar: focused pane title, tab/pane position, grid size.
 - ⬜ Rename tabs, reorder tabs by dragging.
-- ⬜ New tab/pane inherits the cwd (needs shell integration, M3).
+- ✅ New tab/pane inherits the cwd (via shell integration, M3).
 - ⬜ Restore tabs/splits on restart (optional).
 
-## M3 — Shell integration + autocomplete ⬜
+## M3 — Shell integration + autocomplete 🟨
 
-- ⬜ Integration scripts for pwsh, bash, zsh, fish (OSC 133, OSC 7).
-- ⬜ Native input editor while the shell is at the prompt (ADR 0002).
-- ⬜ Autocomplete engine: history, paths, command specs (git, cargo, npm, docker…).
-- ⬜ Inline suggestion (ghost text) + dropdown menu.
+- ✅ OSC 133/7 scanner in front of the parser (`ScanningPty`); ConPTY passes the sequences through (end-to-end test).
+- ✅ Automatic injection without touching dotfiles. PowerShell 5.1/7 validated on Windows; bash/zsh/fish scripts written but **untested** (need Linux).
+- ✅ Native prompt editor drawn over the grid where the prompt ends: word/selection editing, undo, emacs keys, syntax highlighting, history Up/Down filtered by prefix.
+- ✅ Ghost text from history (cwd-aware), accept with →/End (Ctrl+→ one word); imports PSReadLine/bash/zsh history.
+- ✅ Tab completion menu: commands (specs, history, `PATH`), subcommands and options (git, cargo, npm, docker, winget, cd…), paths (quoted per shell), git branches read from `.git`.
+- ✅ Status bar shows cwd and the last non-zero exit code; tabs are named after their folder.
+- ✅ Grid text pinned to cells (fixes a drift of ~0.4 px/column present since M1; cosmic-text's `monospace_width` snapping is broken).
+- ⬜ Multi-line input (Shift+Enter), `Ctrl+R` history search, click to move the caret.
+- ⬜ Completion on a worker thread (today: synchronous local reads; network paths are skipped).
+- ⬜ Shell aliases/functions as completion candidates; importer for Fig specs.
+- ⬜ Verify bash/zsh/fish on Linux.
 
 ## M4 — Sidebar + file tree ⬜
 

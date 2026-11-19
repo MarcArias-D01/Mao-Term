@@ -26,10 +26,17 @@ fn command(text: &str) -> (String, Vec<String>) {
 
 fn screen_text(term: &mut Terminal) -> String {
     let mut text = String::new();
-    term.render(true, true, |_, cells| {
-        text.extend(cells.iter().map(|c| c.ch));
-        text.push('\n');
-    });
+    term.render(
+        mao_terminal::RenderOptions {
+            focused: true,
+            force_full: true,
+            hide_cursor: false,
+        },
+        |_, cells| {
+            text.extend(cells.iter().map(|c| c.ch));
+            text.push('\n');
+        },
+    );
     text
 }
 
@@ -49,6 +56,7 @@ fn echo_output_reaches_the_grid() {
             working_directory: None,
             scrollback: 100,
             palette: palette(),
+            integration_dir: None,
         },
         SIZE,
         move |event| {
@@ -94,6 +102,7 @@ fn input_round_trips_through_the_shell() {
             working_directory: None,
             scrollback: 100,
             palette: palette(),
+            integration_dir: None,
         },
         SIZE,
         move |event| {

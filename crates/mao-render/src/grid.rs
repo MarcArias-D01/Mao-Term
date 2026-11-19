@@ -167,9 +167,12 @@ impl Font {
             .next()
             .and_then(|run| run.glyphs.first().map(|g| g.w))
             .unwrap_or(px * 0.6);
-        // Integer cell width keeps glyphs and backgrounds pixel-aligned.
+        // Use the font's exact advance, not a rounded one: glyphs are laid out with
+        // their natural advance, so a rounded cell width drifts away from the text
+        // (≈0.4 px per column with a 12.6 px advance). cosmic-text 0.19's
+        // `monospace_width` snapping doesn't help: it rounds pixels to em units.
         self.cell = CellMetrics {
-            width: advance.round().max(1.0),
+            width: advance.max(1.0),
             height,
         };
         tracing::debug!(family = ?self.family, px, cell = ?self.cell, "font measured");
@@ -201,26 +204,60 @@ fn resolve_family(font_system: &FontSystem, wanted: &str) -> Option<String> {
     found
 }
 
+/// A run of text anchored at a grid column.
+///
+/// Glyphs are laid out with their natural advance, so text drifts off the cell
+/// grid wherever a glyph's advance isn't exactly one cell (wide CJK, emoji,
+/// symbols from a fallback font). Each such glyph gets its own segment pinned
+/// to its column; ordinary text stays in one segment per row.
+struct Segment {
+    col: usize,
+    buffer: Buffer,
+}
+
 struct Row {
     cells: Vec<GridCell>,
-    buffer: Buffer,
+    /// Segment pool; only the first `used` are current.
+    segments: Vec<Segment>,
+    used: usize,
     /// Background/decoration quads for this row, in target color space.
     quads: Vec<f32>,
     dirty: bool,
 }
 
 impl Row {
-    fn new(cols: usize, font: &Font) -> Self {
-        let mut buffer = Buffer::new_empty(font.metrics);
-        buffer.set_wrap(Wrap::None);
-        buffer.set_monospace_width(Some(font.cell.width));
+    fn new(cols: usize) -> Self {
         Self {
             cells: vec![GridCell::default(); cols],
-            buffer,
+            segments: Vec::new(),
+            used: 0,
             quads: Vec::new(),
             dirty: true,
         }
     }
+
+    /// Next segment from the pool, starting at `col`.
+    fn next_segment(&mut self, col: usize, font: &Font) -> &mut Segment {
+        if self.used == self.segments.len() {
+            let mut buffer = Buffer::new_empty(font.metrics);
+            buffer.set_wrap(Wrap::None);
+            self.segments.push(Segment { col, buffer });
+        }
+        let seg = &mut self.segments[self.used];
+        seg.col = col;
+        self.used += 1;
+        seg
+    }
+}
+
+/// Glyphs whose advance is unlikely to be exactly one cell of the primary font.
+fn needs_own_segment(c: char) -> bool {
+    use unicode_width::UnicodeWidthChar;
+    let cp = c as u32;
+    c.width() == Some(2)
+        // Misc symbols and dingbats (✓ ★ …) usually come from a fallback font.
+        || (0x2600..=0x27BF).contains(&cp)
+        || cp >= 0x1F000
 }
 
 /// Key identifying a run of cells that share text attributes.
@@ -258,7 +295,6 @@ impl Grid {
 
     pub(crate) fn set_layout(
         &mut self,
-        font: &Font,
         origin: (f32, f32),
         cols: usize,
         rows: usize,
@@ -284,15 +320,16 @@ impl Grid {
         }
         self.rows.truncate(rows);
         while self.rows.len() < rows {
-            self.rows.push(Row::new(cols, font));
+            self.rows.push(Row::new(cols));
         }
     }
 
     /// Applies new font metrics to every row.
     pub(crate) fn set_font(&mut self, font: &Font) {
         for row in &mut self.rows {
-            row.buffer.set_metrics(font.metrics);
-            row.buffer.set_monospace_width(Some(font.cell.width));
+            for seg in &mut row.segments {
+                seg.buffer.set_metrics(font.metrics);
+            }
             row.dirty = true;
         }
     }
@@ -333,45 +370,65 @@ impl Grid {
             row.dirty = false;
             let y = self.origin.1 + index as f32 * cell.height;
 
-            // Text, grouped into spans of equal attributes.
-            self.text.clear();
-            self.spans.clear();
-            for c in &row.cells {
-                if c.style.spacer {
+            // Text, in segments anchored to their columns, each grouped into
+            // spans of equal attributes.
+            row.used = 0;
+            let base = font.attrs();
+            let mut col = 0;
+            while col < row.cells.len() {
+                let seg_start = col;
+                self.text.clear();
+                self.spans.clear();
+                while col < row.cells.len() {
+                    let c = &row.cells[col];
+                    let own = needs_own_segment(c.ch);
+                    if own && col > seg_start {
+                        break; // Close the current run; this glyph gets its own.
+                    }
+                    col += 1;
+                    if c.style.spacer {
+                        continue;
+                    }
+                    let key = SpanKey {
+                        fg: c.fg,
+                        bold: c.style.bold,
+                        italic: c.style.italic,
+                    };
+                    let start = self.text.len();
+                    self.text.push(if c.ch == '\0' { ' ' } else { c.ch });
+                    match self.spans.last_mut() {
+                        Some((range, k)) if *k == key => range.end = self.text.len(),
+                        _ => self.spans.push((start..self.text.len(), key)),
+                    }
+                    if own {
+                        break;
+                    }
+                }
+                // Blank runs need no text.
+                if self.text.trim().is_empty() {
                     continue;
                 }
-                let key = SpanKey {
-                    fg: c.fg,
-                    bold: c.style.bold,
-                    italic: c.style.italic,
-                };
-                let start = self.text.len();
-                self.text.push(if c.ch == '\0' { ' ' } else { c.ch });
-                match self.spans.last_mut() {
-                    Some((range, k)) if *k == key => range.end = self.text.len(),
-                    _ => self.spans.push((start..self.text.len(), key)),
-                }
+                let text = &self.text;
+                let seg = row.next_segment(seg_start, font);
+                seg.buffer.set_rich_text(
+                    self.spans.iter().map(|(range, key)| {
+                        let mut attrs = base
+                            .clone()
+                            .color(Color::rgb(key.fg[0], key.fg[1], key.fg[2]));
+                        if key.bold {
+                            attrs = attrs.weight(Weight::BOLD);
+                        }
+                        if key.italic {
+                            attrs = attrs.style(Style::Italic);
+                        }
+                        (&text[range.clone()], attrs)
+                    }),
+                    &base,
+                    Shaping::Advanced,
+                    None,
+                );
+                seg.buffer.shape_until_scroll(font_system, false);
             }
-            let base = font.attrs();
-            let text = &self.text;
-            row.buffer.set_rich_text(
-                self.spans.iter().map(|(range, key)| {
-                    let mut attrs = base
-                        .clone()
-                        .color(Color::rgb(key.fg[0], key.fg[1], key.fg[2]));
-                    if key.bold {
-                        attrs = attrs.weight(Weight::BOLD);
-                    }
-                    if key.italic {
-                        attrs = attrs.style(Style::Italic);
-                    }
-                    (&text[range.clone()], attrs)
-                }),
-                &base,
-                Shaping::Advanced,
-                None,
-            );
-            row.buffer.shape_until_scroll(font_system, false);
 
             // Backgrounds (merged runs) and decorations.
             row.quads.clear();
@@ -455,17 +512,19 @@ impl Grid {
         let bounds = self.clip;
         let (ox, oy) = self.origin;
         let height = font.cell.height;
-        self.rows
-            .iter()
-            .enumerate()
-            .map(move |(i, row)| glyphon::TextArea {
-                buffer: &row.buffer,
-                left: ox,
-                top: oy + i as f32 * height,
-                scale: 1.0,
-                bounds,
-                default_color: Color::rgb(255, 255, 255),
-                custom_glyphs: &[],
-            })
+        let width = font.cell.width;
+        self.rows.iter().enumerate().flat_map(move |(i, row)| {
+            row.segments[..row.used]
+                .iter()
+                .map(move |seg| glyphon::TextArea {
+                    buffer: &seg.buffer,
+                    left: ox + seg.col as f32 * width,
+                    top: oy + i as f32 * height,
+                    scale: 1.0,
+                    bounds,
+                    default_color: Color::rgb(255, 255, 255),
+                    custom_glyphs: &[],
+                })
+        })
     }
 }

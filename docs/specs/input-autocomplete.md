@@ -1,6 +1,6 @@
 # Spec: Input editor and autocomplete
 
-- **Status:** Draft
+- **Status:** In progress
 - **Milestone:** M3
 - **Crates:** `mao-input`, `mao-complete`, `mao-app`
 - **Related:** [shell-integration](shell-integration.md), [ADR 0002](../decisions/0002-native-input-editor.md)

@@ -1,6 +1,6 @@
 # Spec: Shell integration
 
-- **Status:** Draft
+- **Status:** In progress
 - **Milestone:** M3
 - **Crates:** `mao-terminal`; scripts in `shell-integration/`
 - **Related:** [input-autocomplete](input-autocomplete.md), [file-tree](file-tree.md), [ADR 0002](../decisions/0002-native-input-editor.md)

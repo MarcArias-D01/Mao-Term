@@ -286,7 +286,7 @@ impl Renderer {
         self.grids
             .entry(id)
             .or_insert_with(Grid::new)
-            .set_layout(&self.font, origin, cols, rows, clip);
+            .set_layout(origin, cols, rows, clip);
     }
 
     /// Forgets a grid (its pane was closed).

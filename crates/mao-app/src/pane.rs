@@ -1,14 +1,31 @@
 //! A pane: one terminal session plus its per-pane input state.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use mao_render::CellMetrics;
 use mao_terminal::keys::{self, Key, KeyModes, Modifiers};
 use mao_terminal::mouse::{self as tmouse, MouseAction};
-use mao_terminal::{GridSize, SelectionKind, Terminal};
+use mao_terminal::{GridSize, SelectionKind, ShellEvent, ShellKind, Terminal};
 use mao_ui::{PaneId, Rect};
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
+
+use crate::editor::PromptEditor;
+
+/// What the shell is doing, from shell-integration marks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ShellState {
+    /// No integration marks seen (yet): classic terminal behavior.
+    #[default]
+    Unknown,
+    /// Printing its prompt.
+    Prompt,
+    /// Waiting for a command: the prompt editor is active.
+    Input,
+    /// A command is running: keys go to it.
+    Running,
+}
 
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 const WHEEL_LINES: f32 = 3.0;
@@ -38,6 +55,16 @@ pub struct Pane {
     pub origin: (f32, f32),
     /// Next frame must redraw every row of this pane.
     pub full_redraw: bool,
+    pub shell: ShellState,
+    /// Current directory reported by the shell (OSC 7).
+    pub cwd: Option<PathBuf>,
+    /// Exit code of the last command (OSC 133;D).
+    pub last_exit: Option<i32>,
+    pub editor: PromptEditor,
+    /// Rows the editor overlay covered in the last frame.
+    pub overlay_rows: Vec<usize>,
+    /// Where the completion menu goes: (x, y below the caret row, y of the caret row top).
+    pub menu_anchor: Option<(f32, f32, f32)>,
     mouse: PaneMouse,
     buf: Vec<u8>,
 }
@@ -52,8 +79,52 @@ impl Pane {
             rect: Rect::default(),
             origin: (0.0, 0.0),
             full_redraw: true,
+            shell: ShellState::Unknown,
+            cwd: None,
+            last_exit: None,
+            editor: PromptEditor::default(),
+            overlay_rows: Vec::new(),
+            menu_anchor: None,
             mouse: PaneMouse::default(),
             buf: Vec::with_capacity(16),
+        }
+    }
+
+    /// Whether keys go to the prompt editor instead of the shell.
+    pub fn editor_active(&self, enabled: bool) -> bool {
+        enabled
+            && self.shell == ShellState::Input
+            && !self.exited
+            && !self.terminal.modes().alt_screen
+    }
+
+    pub fn quoting(&self) -> mao_complete::Quoting {
+        match self.terminal.shell_kind() {
+            ShellKind::PowerShell => mao_complete::Quoting::PowerShell,
+            _ => mao_complete::Quoting::Posix,
+        }
+    }
+
+    /// Applies a shell-integration mark.
+    pub fn on_shell_event(&mut self, event: ShellEvent) {
+        match event {
+            ShellEvent::PromptStart => self.shell = ShellState::Prompt,
+            ShellEvent::PromptEnd => self.shell = ShellState::Input,
+            ShellEvent::CommandStart => self.shell = ShellState::Running,
+            ShellEvent::CommandEnd(code) => self.last_exit = code,
+            ShellEvent::Cwd(path) => self.cwd = Some(path),
+        }
+    }
+
+    /// Display name: the cwd's folder if known, else the program's title.
+    pub fn display_name(&self) -> String {
+        match self.cwd.as_ref().and_then(|p| p.file_name()) {
+            Some(name) => name.to_string_lossy().into_owned(),
+            None => match &self.cwd {
+                // A drive root like `C:\` has no file name.
+                Some(p) => p.display().to_string(),
+                None => self.short_title().to_owned(),
+            },
         }
     }
 
@@ -63,6 +134,9 @@ impl Pane {
         self.title.clear();
         self.exited = false;
         self.full_redraw = true;
+        self.shell = ShellState::Unknown;
+        self.last_exit = None;
+        self.editor = PromptEditor::default();
         self.mouse = PaneMouse::default();
     }
 

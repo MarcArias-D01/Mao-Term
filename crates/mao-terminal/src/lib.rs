@@ -3,10 +3,13 @@
 //! `alacritty_terminal` types never leak out of this crate: the UI gets plain
 //! RGB cells through [`Terminal::render`]. See `docs/specs/terminal-core.md`.
 
+pub mod integration;
 pub mod keys;
 pub mod mouse;
+mod osc;
 mod palette;
 mod platform;
+mod pty;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -23,8 +26,12 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{self, Term, TermDamage, TermMode};
 use alacritty_terminal::tty::{self, Shell};
+
+use crate::pty::ScanningPty;
 use alacritty_terminal::vte::ansi::{CursorShape as VtCursorShape, Processor};
 
+pub use integration::ShellKind;
+pub use osc::ShellEvent;
 pub use palette::{Palette, Rgb8};
 
 /// Errors raised when creating a terminal session.
@@ -50,6 +57,8 @@ pub enum TerminalEvent {
     ClipboardStore(String),
     /// The shell exited, with its exit code when known.
     Exited(Option<i32>),
+    /// Shell-integration mark (prompt, command, cwd).
+    Shell(ShellEvent),
 }
 
 /// Grid size in cells plus cell size in pixels.
@@ -95,6 +104,8 @@ pub struct SpawnOptions {
     pub working_directory: Option<PathBuf>,
     pub scrollback: usize,
     pub palette: Palette,
+    /// Folder for the shell-integration scripts; `None` disables integration.
+    pub integration_dir: Option<PathBuf>,
 }
 
 /// Visual style of a cell.
@@ -143,6 +154,17 @@ pub struct RenderInfo {
     pub cursor: Option<CursorView>,
     /// Lines scrolled back into history (0 = at the bottom).
     pub display_offset: usize,
+}
+
+/// Options for [`Terminal::render`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RenderOptions {
+    /// The pane has keyboard focus (solid vs hollow block cursor).
+    pub focused: bool,
+    /// Visit every row, not just the changed ones.
+    pub force_full: bool,
+    /// Don't draw the terminal cursor (e.g. the input editor draws its own).
+    pub hide_cursor: bool,
 }
 
 /// Terminal modes the UI cares about.
@@ -223,6 +245,7 @@ impl EventListener for EventProxy {
 pub struct Terminal {
     term: Arc<FairMutex<Term<EventProxy>>>,
     proxy: EventProxy,
+    kind: ShellKind,
     size: GridSize,
     palette: Palette,
     // Render state, reused across frames to avoid allocations.
@@ -231,6 +254,8 @@ pub struct Terminal {
     last_cursor_row: Option<usize>,
     last_offset: usize,
     last_selection: Option<SelectionRange>,
+    /// Rows to visit on the next render regardless of damage (UI overlays).
+    extra_dirty: Vec<usize>,
 }
 
 impl Terminal {
@@ -240,17 +265,22 @@ impl Terminal {
         size: GridSize,
         notify: impl Fn(TerminalEvent) + Send + Sync + 'static,
     ) -> Result<Self, TerminalError> {
-        let shell = match options.program {
-            Some(program) => Some(Shell::new(program, options.args)),
+        let (program, mut args) = match options.program {
+            Some(program) => (program, options.args),
             None => platform::default_shell(),
         };
-        let env = HashMap::from([
+        let mut env = HashMap::from([
             ("TERM".to_owned(), "xterm-256color".to_owned()),
             ("COLORTERM".to_owned(), "truecolor".to_owned()),
             ("TERM_PROGRAM".to_owned(), "mao-term".to_owned()),
         ]);
+        let kind = ShellKind::detect(&program);
+        if let Some(dir) = &options.integration_dir {
+            integration::inject(&program, &mut args, &mut env, dir);
+        }
+        tracing::debug!(%program, ?args, ?kind, "spawning shell");
         let pty_options = tty::Options {
-            shell,
+            shell: Some(Shell::new(program, args)),
             working_directory: options.working_directory,
             drain_on_exit: false,
             env,
@@ -259,11 +289,18 @@ impl Terminal {
         };
         let pty = tty::new(&pty_options, size.window_size(), 0).map_err(TerminalError::Pty)?;
 
+        let notify: Arc<dyn Fn(TerminalEvent) + Send + Sync> = Arc::new(notify);
+        let shell_notify = Arc::clone(&notify);
+        let pty = ScanningPty::new(
+            pty,
+            Arc::new(move |e| shell_notify(TerminalEvent::Shell(e))),
+        );
+
         let proxy = EventProxy(Arc::new(Shared {
             sender: OnceLock::new(),
             size: Mutex::new(size.window_size()),
             wakeup_pending: AtomicBool::new(false),
-            notify: Box::new(notify),
+            notify: Box::new(move |e| notify(e)),
         }));
         let config = term::Config {
             scrolling_history: options.scrollback,
@@ -281,6 +318,7 @@ impl Terminal {
         Ok(Self {
             term,
             proxy,
+            kind,
             size,
             palette: options.palette,
             dirty: Vec::new(),
@@ -288,11 +326,17 @@ impl Terminal {
             last_cursor_row: None,
             last_offset: 0,
             last_selection: None,
+            extra_dirty: Vec::new(),
         })
     }
 
     pub fn size(&self) -> GridSize {
         self.size
+    }
+
+    /// The kind of shell running (for quoting and completion rules).
+    pub fn shell_kind(&self) -> ShellKind {
+        self.kind
     }
 
     /// Sends bytes to the shell. Never blocks: the write happens on the I/O thread.
@@ -423,14 +467,33 @@ impl Terminal {
             .filter(|s| !s.is_empty())
     }
 
+    /// Forces these viewport rows to be visited by the next [`Self::render`]
+    /// (e.g. rows an overlay drew over).
+    pub fn invalidate_rows(&mut self, rows: impl IntoIterator<Item = usize>) {
+        self.extra_dirty.extend(rows);
+    }
+
+    /// Viewport position (row, col) of the terminal cursor, if visible.
+    pub fn cursor_position(&self) -> Option<(usize, usize)> {
+        let term = self.term.lock();
+        let offset = term.grid().display_offset() as i32;
+        let point = term.grid().cursor.point;
+        let row = usize::try_from(point.line.0 + offset).ok()?;
+        (row < usize::from(self.size.rows)).then_some((row, point.column.0))
+    }
+
     /// Visits the rows that changed since the last call (all rows if `force_full`),
     /// with colors fully resolved (selection and block cursor included).
     pub fn render(
         &mut self,
-        focused: bool,
-        force_full: bool,
+        opts: RenderOptions,
         mut on_row: impl FnMut(usize, &[CellView]),
     ) -> RenderInfo {
+        let RenderOptions {
+            focused,
+            force_full,
+            hide_cursor,
+        } = opts;
         // New output after this point must trigger a new wakeup.
         self.proxy.0.wakeup_pending.store(false, Ordering::Release);
 
@@ -451,6 +514,11 @@ impl Terminal {
             }
         }
         term.reset_damage();
+        for row in self.extra_dirty.drain(..) {
+            if let Some(d) = self.dirty.get_mut(row) {
+                *d = true;
+            }
+        }
 
         let content = term.renderable_content();
         let offset = content.display_offset;
@@ -466,6 +534,7 @@ impl Terminal {
             .ok()
             .filter(|&r| r < rows);
         let cursor_shape = match content.cursor.shape {
+            _ if hide_cursor => None,
             VtCursorShape::Hidden => None,
             VtCursorShape::Block if focused => Some(CursorShape::Block),
             VtCursorShape::Block | VtCursorShape::HollowBlock => Some(CursorShape::HollowBlock),

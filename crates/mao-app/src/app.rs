@@ -1,11 +1,16 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use anyhow::Context;
+use mao_complete::{Engine, History};
 use mao_config::Config;
 use mao_render::{FontLoader, FontSpec, FrameOutcome, GridId, Renderer, RendererOptions, UiFrame};
-use mao_terminal::{GridSize, Palette as TermPalette, SpawnOptions, Terminal, TerminalEvent};
+use mao_terminal::{
+    GridSize, Palette as TermPalette, RenderOptions, SpawnOptions, Terminal, TerminalEvent,
+};
 use mao_ui::{Divider, PaneId, SplitDir};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
@@ -15,10 +20,12 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::actions::Action;
-use crate::chrome::{self, Colors, DrawState, Hit, Layout, Metrics};
+use crate::chrome::{self, Colors, DrawState, Hit, Layout, MenuView, Metrics};
+use crate::editor::{Ctx, Outcome};
 use crate::input;
+use crate::overlay::{self, OverlayColors};
 use crate::palette::Palette;
-use crate::pane::{Pane, grid_for};
+use crate::pane::{Pane, ShellState, grid_for};
 use crate::workspace::{Closed, Workspace};
 
 const MIN_FONT_SIZE: f32 = 6.0;
@@ -34,6 +41,8 @@ pub enum UserEvent {
         session: u64,
         event: TerminalEvent,
     },
+    /// Executables found on `PATH` (scanned in the background).
+    Executables(Vec<String>),
 }
 
 /// Whether the app should keep running after handling something.
@@ -70,11 +79,17 @@ struct Win {
     focused: bool,
     scale: f32,
     shown: bool,
+    engine: Engine,
+    editor_enabled: bool,
+    overlay_colors: OverlayColors,
+    /// Scratch row for compositing the editor overlay.
+    row_buf: Vec<mao_render::GridCell>,
 }
 
 pub struct App {
     config: Config,
     fonts: Option<FontLoader>,
+    history: Option<JoinHandle<History>>,
     proxy: EventLoopProxy<UserEvent>,
     started: Instant,
     win: Option<Win>,
@@ -85,12 +100,14 @@ impl App {
     pub fn new(
         config: Config,
         fonts: FontLoader,
+        history: JoinHandle<History>,
         proxy: EventLoopProxy<UserEvent>,
         started: Instant,
     ) -> Self {
         Self {
             config,
             fonts: Some(fonts),
+            history: Some(history),
             proxy,
             started,
             win: None,
@@ -111,13 +128,18 @@ impl App {
 
     fn create_window(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<Win> {
         let fonts = self.fonts.take().context("window already created")?;
+        let background = std::env::var_os("MAO_DEBUG_BACKGROUND").is_some();
         let attributes = Window::default_attributes()
             .with_title("Mao-Term")
             .with_inner_size(LogicalSize::new(
                 self.config.window.width,
                 self.config.window.height,
             ))
-            .with_visible(false);
+            // Testing aid: open without taking keyboard focus, so automated checks
+            // never capture what the user is typing elsewhere. Showing a hidden
+            // window later would activate it, so in that mode it starts visible.
+            .with_visible(background)
+            .with_active(!background);
         let t = Instant::now();
         let window = Arc::new(event_loop.create_window(attributes)?);
         tracing::debug!(ms = t.elapsed().as_millis(), "startup: window created");
@@ -141,6 +163,20 @@ impl App {
             .map_err(|e| tracing::warn!("clipboard unavailable: {e}"))
             .ok();
         let metrics = Metrics::new(scale, self.config.terminal.padding);
+        let history = self
+            .history
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+        tracing::debug!(entries = history.len(), "history loaded");
+        // PATH scanning reads hundreds of directories: keep it off the UI thread.
+        let proxy = self.proxy.clone();
+        let _ = std::thread::Builder::new()
+            .name("path-scan".into())
+            .spawn(move || {
+                let names = mao_complete::paths::scan_path_executables();
+                let _ = proxy.send_event(UserEvent::Executables(names));
+            });
         let mut win = Win {
             layout: Layout::new((size.width, size.height), &metrics, 1),
             metrics,
@@ -163,7 +199,11 @@ impl App {
             capture: None,
             focused: true,
             scale,
-            shown: false,
+            shown: background,
+            engine: Engine::new(history),
+            editor_enabled: self.config.input.editor,
+            overlay_colors: OverlayColors::new(&self.config.theme),
+            row_buf: Vec::new(),
         };
         win.new_tab(&self.config)?;
         tracing::debug!(ms = t.elapsed().as_millis(), "startup: shell spawned");
@@ -230,11 +270,22 @@ impl Win {
         self.window.request_redraw();
     }
 
+    /// Directory new shells start in: the focused pane's.
+    fn current_cwd(&self) -> Option<PathBuf> {
+        self.ws.focused_pane().and_then(|p| p.cwd.clone())
+    }
+
     /// Starts a shell for `pane` with the given grid size.
-    fn spawn(&mut self, config: &Config, pane: PaneId, grid: GridSize) -> anyhow::Result<Terminal> {
+    fn spawn(
+        &mut self,
+        config: &Config,
+        pane: PaneId,
+        grid: GridSize,
+        cwd: Option<PathBuf>,
+    ) -> anyhow::Result<Terminal> {
         self.next_session += 1;
         let session = self.next_session;
-        let terminal = spawn_terminal(config, grid, &self.proxy, pane, session)?;
+        let terminal = spawn_terminal(config, grid, &self.proxy, pane, session, cwd)?;
         self.sessions.insert(pane, session);
         Ok(terminal)
     }
@@ -244,7 +295,8 @@ impl Win {
         // Size the shell for the content area right away.
         let layout = Layout::new(self.renderer.size(), &self.metrics, self.ws.tabs.len() + 1);
         let grid = grid_for(layout.content, self.metrics.pad, self.cell());
-        let terminal = self.spawn(config, id, grid)?;
+        let cwd = self.current_cwd();
+        let terminal = self.spawn(config, id, grid, cwd)?;
         self.ws.add_tab(Pane::new(id, terminal));
         self.relayout(config.terminal.padding);
         self.update_title();
@@ -273,7 +325,8 @@ impl Win {
             .into_iter()
             .find(|(p, _)| *p == id)
             .map_or(content, |(_, r)| r);
-        match self.spawn(config, id, grid_for(rect, pad, cell)) {
+        let cwd = self.current_cwd();
+        match self.spawn(config, id, grid_for(rect, pad, cell), cwd) {
             Ok(terminal) => {
                 self.ws.panes.insert(id, Pane::new(id, terminal));
                 self.ws.focus(id);
@@ -458,6 +511,13 @@ impl Win {
             return self.on_palette_key(config, event);
         }
         let mods = input::modifiers(self.modifiers);
+        let editor_on = self
+            .ws
+            .focused_pane()
+            .is_some_and(|p| p.editor_active(config.input.editor));
+        if editor_on {
+            return self.on_editor_key(config, event, mods);
+        }
         if let Some(action) = input::action_for(event, mods) {
             return self.run(config, action);
         }
@@ -480,6 +540,116 @@ impl Win {
             pane.write_key(key, mods);
         }
         Flow::Continue
+    }
+
+    /// Keys while the focused pane's shell waits at its prompt.
+    fn on_editor_key(
+        &mut self,
+        config: &Config,
+        event: &KeyEvent,
+        mods: mao_terminal::keys::Modifiers,
+    ) -> Flow {
+        let Some(id) = self.ws.focused_id() else {
+            return Flow::Continue;
+        };
+        match input::action_for(event, mods) {
+            // Ctrl+C: copy a selection, else clear the line (like shells do).
+            Some(Action::CopyOrInterrupt) => {
+                let Some(pane) = self.ws.panes.get_mut(&id) else {
+                    return Flow::Continue;
+                };
+                if pane.copy_selection(self.clipboard.as_mut()) {
+                    pane.terminal.clear_selection();
+                } else if let Some(text) = pane.editor.line.selected_text() {
+                    if let Some(clipboard) = self.clipboard.as_mut() {
+                        let _ = clipboard.set_text(text.to_owned());
+                    }
+                } else {
+                    pane.editor = crate::editor::PromptEditor::default();
+                }
+                self.window.request_redraw();
+                return Flow::Continue;
+            }
+            Some(Action::Paste) => {
+                let text = self.clipboard.as_mut().and_then(|c| c.get_text().ok());
+                if let Some(text) = text {
+                    self.paste_into_editor(config, id, &text);
+                }
+                return Flow::Continue;
+            }
+            // Shift+Home/End select in the editor instead of scrolling.
+            Some(Action::ScrollToTop | Action::ScrollToBottom) => {}
+            Some(action) => return self.run(config, action),
+            None => {}
+        }
+
+        let engine = &self.engine;
+        let Some(pane) = self.ws.panes.get_mut(&id) else {
+            return Flow::Continue;
+        };
+        let ctx = Ctx {
+            engine,
+            cwd: pane.cwd.as_deref(),
+            quoting: pane.quoting(),
+            suggestions: config.input.suggestions,
+        };
+        let outcome = pane.editor.on_key(event, mods, ctx);
+        tracing::trace!(key = ?event.logical_key, text = ?event.text, ?outcome, line = pane.editor.line.text(), "editor key");
+        match outcome {
+            Outcome::Ignored => {}
+            Outcome::Changed => {
+                pane.terminal.scroll_to_bottom();
+                pane.terminal.clear_selection();
+                self.window.request_redraw();
+            }
+            Outcome::Submit(line) => self.submit(id, &line),
+            Outcome::PassThrough => {
+                if let Some(key) = input::terminal_key(event) {
+                    pane.write_key(key, mods);
+                }
+            }
+        }
+        Flow::Continue
+    }
+
+    /// Runs a command line from the editor in pane `id`.
+    fn submit(&mut self, id: PaneId, line: &str) {
+        let Some(pane) = self.ws.panes.get_mut(&id) else {
+            return;
+        };
+        tracing::debug!(line, "submit");
+        if !line.trim().is_empty() {
+            self.engine.history.add(line, pane.cwd.as_deref());
+        }
+        pane.editor = crate::editor::PromptEditor::default();
+        pane.shell = ShellState::Running;
+        pane.terminal.scroll_to_bottom();
+        pane.terminal.clear_selection();
+        pane.terminal.write(format!("{line}\r").into_bytes());
+        self.window.request_redraw();
+    }
+
+    fn paste_into_editor(&mut self, config: &Config, id: PaneId, text: &str) {
+        let engine = &self.engine;
+        let Some(pane) = self.ws.panes.get_mut(&id) else {
+            return;
+        };
+        if text.contains(['\n', '\r']) {
+            // Multi-line: hand everything to the shell as a regular paste.
+            let typed = pane.editor.line.take();
+            pane.editor = crate::editor::PromptEditor::default();
+            pane.shell = ShellState::Running;
+            pane.terminal.paste(&format!("{typed}{text}"));
+        } else {
+            let ctx = Ctx {
+                engine,
+                cwd: pane.cwd.as_deref(),
+                quoting: pane.quoting(),
+                suggestions: config.input.suggestions,
+            };
+            pane.editor.insert(text, ctx);
+        }
+        self.window.request_redraw();
     }
 
     fn on_palette_key(&mut self, config: &Config, event: &KeyEvent) -> Flow {
@@ -514,10 +684,15 @@ impl Win {
 
     /// Replaces an exited pane's shell with a fresh one.
     fn restart(&mut self, config: &Config, id: PaneId) {
-        let Some(grid) = self.ws.panes.get(&id).map(|p| p.terminal.size()) else {
+        let Some((grid, cwd)) = self
+            .ws
+            .panes
+            .get(&id)
+            .map(|p| (p.terminal.size(), p.cwd.clone()))
+        else {
             return;
         };
-        match self.spawn(config, id, grid) {
+        match self.spawn(config, id, grid, cwd) {
             Ok(terminal) => {
                 if let Some(pane) = self.ws.panes.get_mut(&id) {
                     pane.replace_terminal(terminal);
@@ -725,18 +900,29 @@ impl Win {
                 self.update_title();
                 self.window.request_redraw();
             }
-            TerminalEvent::Bell => self.window.request_user_attention(None),
+            TerminalEvent::Bell => {
+                tracing::debug!(pane = pane_id, "bell");
+                self.window.request_user_attention(None);
+            }
             TerminalEvent::ClipboardStore(text) => {
                 if let Some(clipboard) = self.clipboard.as_mut() {
                     let _ = clipboard.set_text(text);
                 }
             }
             TerminalEvent::Exited(code) => pane.on_shell_exit(code),
+            TerminalEvent::Shell(event) => {
+                tracing::trace!(pane = pane_id, ?event, "shell event");
+                pane.on_shell_event(event);
+                self.update_title();
+                self.window.request_redraw();
+            }
         }
     }
 
     fn draw(&mut self, background: [u8; 3]) -> Result<FrameOutcome, mao_render::RenderError> {
         self.visible.clear();
+        let cell = self.cell();
+        let editor_enabled = self.editor_enabled;
         if let Some(tab) = self.ws.active_tab() {
             let focused_pane = tab.focused;
             for (id, _) in tab.layout(self.layout.content, self.metrics.gap) {
@@ -749,13 +935,84 @@ impl Win {
                     self.renderer.invalidate_grid(id);
                 }
                 let focused = self.focused && id == focused_pane && self.palette.is_none();
+
+                // The prompt editor, drawn over the terminal where the prompt ends.
+                let size = pane.terminal.size();
+                let overlay = if pane.editor_active(editor_enabled) {
+                    pane.terminal.cursor_position().map(|start| {
+                        overlay::layout(
+                            &pane.editor,
+                            start,
+                            usize::from(size.cols),
+                            usize::from(size.rows),
+                            &self.overlay_colors,
+                        )
+                    })
+                } else {
+                    None
+                };
+                let new_rows = overlay.as_ref().map(|o| o.rows.clone()).unwrap_or_default();
+                let stale = std::mem::replace(&mut pane.overlay_rows, new_rows);
+                pane.terminal
+                    .invalidate_rows(stale.into_iter().chain(pane.overlay_rows.iter().copied()));
+
                 let renderer = &mut self.renderer;
-                let info = pane.terminal.render(focused, full, |row, cells| {
-                    renderer.set_row(id, row, cells.iter().map(to_grid_cell));
+                let row_buf = &mut self.row_buf;
+                let info = pane.terminal.render(
+                    RenderOptions {
+                        focused,
+                        force_full: full,
+                        hide_cursor: overlay.is_some(),
+                    },
+                    |row, cells| match &overlay {
+                        Some(o) if o.rows.contains(&row) => {
+                            row_buf.clear();
+                            row_buf.extend(cells.iter().map(to_grid_cell));
+                            for (r, c, cell) in &o.cells {
+                                if *r == row
+                                    && let Some(slot) = row_buf.get_mut(*c)
+                                {
+                                    *slot = *cell;
+                                }
+                            }
+                            renderer.set_row(id, row, row_buf.drain(..));
+                        }
+                        _ => renderer.set_row(id, row, cells.iter().map(to_grid_cell)),
+                    },
+                );
+                let cursor = match &overlay {
+                    Some(o) => Some(mao_render::Cursor {
+                        row: o.caret.0,
+                        col: o.caret.1,
+                        shape: if focused {
+                            mao_render::CursorShape::Beam
+                        } else {
+                            mao_render::CursorShape::HollowBlock
+                        },
+                        color: self.overlay_colors.cursor,
+                        wide: false,
+                    }),
+                    None => info.cursor.map(to_cursor),
+                };
+                renderer.set_cursor(id, cursor);
+                pane.menu_anchor = overlay.as_ref().map(|o| {
+                    let (r, c) = o.menu_anchor;
+                    let x = pane.origin.0 + c as f32 * cell.width;
+                    let top = pane.origin.1 + r as f32 * cell.height;
+                    (x, top + cell.height, top)
                 });
-                renderer.set_cursor(id, info.cursor.map(to_cursor));
             }
         }
+        let menu = self.ws.focused_pane().and_then(|p| {
+            let menu = p.editor.menu.as_ref()?;
+            let (x, below, above) = p.menu_anchor?;
+            Some(MenuView {
+                menu,
+                x,
+                below,
+                above,
+            })
+        });
         chrome::draw(
             &mut self.ui,
             &DrawState {
@@ -766,6 +1023,7 @@ impl Win {
                 palette: self.palette.as_ref(),
                 hover: &self.hover,
                 window_focused: self.focused,
+                menu,
             },
         );
         self.renderer.render(background, &self.visible, &self.ui)
@@ -808,12 +1066,17 @@ impl ApplicationHandler<UserEvent> for App {
         let Some(w) = self.win.as_mut() else {
             return;
         };
-        let UserEvent::Terminal {
-            pane,
-            session,
-            event,
-        } = event;
-        w.on_terminal_event(pane, session, event);
+        match event {
+            UserEvent::Terminal {
+                pane,
+                session,
+                event,
+            } => w.on_terminal_event(pane, session, event),
+            UserEvent::Executables(names) => {
+                tracing::debug!(count = names.len(), "PATH executables scanned");
+                w.engine.set_executables(names);
+            }
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -884,6 +1147,7 @@ fn spawn_terminal(
     proxy: &EventLoopProxy<UserEvent>,
     pane: PaneId,
     session: u64,
+    cwd: Option<PathBuf>,
 ) -> anyhow::Result<Terminal> {
     let theme = &config.theme;
     let palette = TermPalette::new(
@@ -898,9 +1162,14 @@ fn spawn_terminal(
         SpawnOptions {
             program: config.shell.program.clone(),
             args: config.shell.args.clone(),
-            working_directory: None,
+            working_directory: cwd.filter(|p| p.is_dir()),
             scrollback: config.terminal.scrollback,
             palette,
+            integration_dir: config
+                .shell
+                .integration
+                .then(|| mao_config::data_dir().map(|d| d.join("shell-integration")))
+                .flatten(),
         },
         grid,
         move |event| {
