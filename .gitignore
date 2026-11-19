@@ -1,0 +1,18 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Profiling / benchmarks
+*.trace
+flamegraph*.svg
+perf.data*
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Agent local settings
+.claude/settings.local.json
