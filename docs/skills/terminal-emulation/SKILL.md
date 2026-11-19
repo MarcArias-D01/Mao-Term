@@ -42,7 +42,8 @@ description: Practical knowledge for working with PTY/ConPTY, VT/ANSI/OSC sequen
 
 ## Debugging
 
-1. **Record raw bytes**: with `MAO_PTY_LOG=<file>` the I/O thread dumps everything read (debug feature). Reproduce by feeding the `Term` in a test.
+0. **Drive the shell without touching other windows**: `MAO_DEBUG_INPUT='dir\n' cargo run -p mao-app` types into Mao-Term's own PTY at startup (a literal `\n` = Enter). To look at the result, capture *that* window (e.g. Win32 `PrintWindow`), not the screen. Never use OS-level key injection (e.g. `SendKeys`): if focus is not obtained, keystrokes land in whatever window the user has focused.
+1. **Record raw bytes** *(planned)*: with `MAO_PTY_LOG=<file>` the I/O thread dumps everything read (debug feature). Reproduce by feeding the `Term` in a test.
 2. Compare with another terminal: Windows Terminal (Windows), Alacritty/WezTerm (Linux).
 3. Test with: `vttest`, `vim`, `htop`/`btop`, `tmux`, `less`, `fzf`, a mouse-enabled TUI, and `cat` of a file with wide Unicode and emoji.
 4. To inspect sequences: `showkey -a` (Linux) or a script that prints received bytes.

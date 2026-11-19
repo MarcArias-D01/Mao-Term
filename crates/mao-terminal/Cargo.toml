@@ -1,5 +1,6 @@
 [package]
 name = "mao-terminal"
+description = "Terminal sessions for Mao-Term: PTY + VT emulation."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,6 +8,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+alacritty_terminal = "0.26"
+thiserror.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

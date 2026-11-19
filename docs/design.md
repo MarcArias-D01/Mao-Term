@@ -112,7 +112,7 @@ See the [`performance`](skills/performance/SKILL.md) skill for how to measure.
 |---|---|---|
 | PTY | ConPTY (Windows 10 1809+) | `openpty` |
 | Default shell | `pwsh` → `powershell` → `cmd` | `$SHELL` → `/bin/bash` |
-| GPU backend | wgpu's choice among DX12/Vulkan/GL (override: `WGPU_BACKEND=dx12`) | Vulkan (GL fallback) |
+| GPU backend | DX12 first (faster init), then any (override: `WGPU_BACKEND=vulkan`) | Vulkan (GL fallback) |
 | Windowing | Win32 | X11 and Wayland |
 | Config | `%APPDATA%\mao-term\` | `$XDG_CONFIG_HOME/mao-term/` |
 

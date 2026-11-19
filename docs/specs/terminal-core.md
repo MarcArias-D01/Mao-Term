@@ -1,6 +1,6 @@
 # Spec: Terminal core
 
-- **Status:** Draft
+- **Status:** In progress
 - **Milestone:** M1
 - **Crates:** `mao-terminal`, `mao-app`
 - **Related:** [renderer](renderer.md), [shell-integration](shell-integration.md), [ADR 0001](../decisions/0001-render-stack.md)
@@ -75,5 +75,6 @@ pub struct TerminalSession {
 
 ## Open questions
 
-- `alacritty_terminal::tty` or `portable-pty`? → M0 spike.
+- ~~`alacritty_terminal::tty` or `portable-pty`?~~ → `alacritty_terminal::tty`, validated in M0 (works with ConPTY for input and output).
+- Ship Windows Terminal's newer `conpty.dll`/`OpenConsole.exe`? The inbox ConPTY is the throughput bottleneck (see roadmap M1 measurements).
 - Copy-on-select enabled by default on Linux?

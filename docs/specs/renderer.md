@@ -1,6 +1,6 @@
 # Spec: Renderer
 
-- **Status:** Draft
+- **Status:** In progress
 - **Milestone:** M0–M1
 - **Crates:** `mao-render`, `mao-ui`
 - **Related:** [terminal-core](terminal-core.md), [ADR 0001](../decisions/0001-render-stack.md)
@@ -47,5 +47,6 @@ Draw the terminal and UI on the GPU with minimal latency and zero cost when noth
 
 ## Open questions
 
-- Default font? (candidates: JetBrains Mono, Cascadia Code — both OFL).
+- Default font? (candidates: JetBrains Mono, Cascadia Code — both OFL). Today: the configured family, falling back to installed monospace fonts (Cascadia Mono on Windows 11).
+- Color emoji: Segoe UI Emoji (COLR) renders blank through glyphon/swash; needs investigation.
 - Subpixel (ClearType) or grayscale-only antialiasing?

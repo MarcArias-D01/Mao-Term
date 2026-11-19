@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod input;
 
 use std::time::Instant;
 
@@ -13,13 +14,17 @@ fn main() -> anyhow::Result<()> {
     let started = Instant::now();
     init_logging();
 
+    // Font discovery is slow; overlap it with config, window and GPU setup.
+    let fonts = mao_render::FontLoader::start();
     let config = mao_config::Config::load_or_default();
 
-    let event_loop = EventLoop::new().context("failed to create the event loop")?;
+    let event_loop = EventLoop::<app::UserEvent>::with_user_event()
+        .build()
+        .context("failed to create the event loop")?;
     // Render on demand: sleep until an event arrives.
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = app::App::new(config, started);
+    let mut app = app::App::new(config, fonts, event_loop.create_proxy(), started);
     event_loop.run_app(&mut app).context("event loop error")?;
     app.exit_result()
 }

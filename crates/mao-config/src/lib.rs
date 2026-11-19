@@ -38,6 +38,8 @@ pub struct Config {
     pub font: FontConfig,
     pub theme: ThemeConfig,
     pub window: WindowConfig,
+    pub terminal: TerminalConfig,
+    pub shell: ShellConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -62,15 +64,68 @@ impl Default for FontConfig {
 pub struct ThemeConfig {
     pub background: Rgb,
     pub foreground: Rgb,
+    pub cursor: Rgb,
+    pub selection: Rgb,
+    /// The 16 ANSI colors: black, red, green, yellow, blue, magenta, cyan, white,
+    /// then their bright variants in the same order.
+    pub ansi: [Rgb; 16],
 }
 
 impl Default for ThemeConfig {
     fn default() -> Self {
+        let c = Rgb::new;
         Self {
-            background: Rgb::new(0x14, 0x16, 0x1b),
-            foreground: Rgb::new(0xd8, 0xde, 0xe9),
+            background: c(0x14, 0x16, 0x1b),
+            foreground: c(0xd8, 0xde, 0xe9),
+            cursor: c(0x8a, 0xb4, 0xf8),
+            selection: c(0x2e, 0x3a, 0x55),
+            ansi: [
+                c(0x1d, 0x20, 0x27),
+                c(0xf2, 0x77, 0x7a),
+                c(0x99, 0xcc, 0x99),
+                c(0xff, 0xcc, 0x66),
+                c(0x66, 0x99, 0xcc),
+                c(0xcc, 0x99, 0xcc),
+                c(0x66, 0xcc, 0xcc),
+                c(0xd8, 0xde, 0xe9),
+                c(0x5c, 0x63, 0x70),
+                c(0xff, 0x8f, 0x8f),
+                c(0xb5, 0xe8, 0xa0),
+                c(0xff, 0xe0, 0x8a),
+                c(0x8a, 0xb4, 0xf8),
+                c(0xe0, 0xb0, 0xff),
+                c(0x8b, 0xe9, 0xfd),
+                c(0xff, 0xff, 0xff),
+            ],
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TerminalConfig {
+    /// Lines of scrollback history.
+    pub scrollback: usize,
+    /// Padding around the grid, in logical pixels.
+    pub padding: f32,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            scrollback: 10_000,
+            padding: 8.0,
+        }
+    }
+}
+
+/// Shell to launch. When `program` is unset the OS default is used
+/// (`pwsh` → `powershell` on Windows, `$SHELL` on Linux).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShellConfig {
+    pub program: Option<String>,
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

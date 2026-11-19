@@ -20,6 +20,7 @@ For emulation: write our own VT parser vs. reuse `alacritty_terminal`.
 - Window: `winit`. GPU: `wgpu`. Text: `glyphon`/`cosmic-text`. Chrome layout: `taffy`.
 - Emulation: `alacritty_terminal` (parser, grid, scrollback, damage tracking).
 - PTY: `alacritty_terminal::tty`; if the M0 spike shows ConPTY issues, `portable-pty`.
+  *Update (M0 spike):* `alacritty_terminal::tty` works with ConPTY for input and output; `portable-pty` is not needed.
 
 ## Consequences
 
