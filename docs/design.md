@@ -99,7 +99,7 @@ Measured in release, on an average laptop (4+ cores, integrated GPU).
 | Startup to first frame with prompt | < 200 ms |
 | Key → pixel latency (excluding vsync) | < 10 ms |
 | Idle CPU (1 tab, blinking cursor) | ~0% (< 0.5%) |
-| RAM with 1 tab, 10k lines of scrollback | < 120 MB |
+| RAM with 1 tab, 10k lines of scrollback | < 50 MB above the empty-window baseline (baseline is ~70–100 MB private, mostly the GPU driver; see roadmap M0) |
 | `cat` of 100 MB of text | Similar to Alacritty (±25%) |
 | Autocomplete suggestion (local sources) | < 5 ms per keystroke |
 | Sidebar/agents/monitor closed | zero cost (no threads or timers) |
@@ -112,7 +112,7 @@ See the [`performance`](skills/performance/SKILL.md) skill for how to measure.
 |---|---|---|
 | PTY | ConPTY (Windows 10 1809+) | `openpty` |
 | Default shell | `pwsh` → `powershell` → `cmd` | `$SHELL` → `/bin/bash` |
-| GPU backend | DX12 (Vulkan fallback) | Vulkan (GL fallback) |
+| GPU backend | wgpu's choice among DX12/Vulkan/GL (override: `WGPU_BACKEND=dx12`) | Vulkan (GL fallback) |
 | Windowing | Win32 | X11 and Wayland |
 | Config | `%APPDATA%\mao-term\` | `$XDG_CONFIG_HOME/mao-term/` |
 

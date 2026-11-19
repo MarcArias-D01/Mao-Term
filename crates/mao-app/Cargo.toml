@@ -1,0 +1,23 @@
+[package]
+name = "mao-app"
+description = "Mao-Term: a fast, modern GPU terminal."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "mao-term"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+mao-config.workspace = true
+mao-render.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+winit.workspace = true
+
+[lints]
+workspace = true

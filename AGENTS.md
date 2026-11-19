@@ -60,7 +60,8 @@ Skills live in `docs/skills/<name>/SKILL.md` (frontmatter with `name` + `descrip
 
 ```sh
 cargo build                          # build
-cargo run -p mao-app                 # run the terminal
+cargo run -p mao-app                 # run the terminal (binary: mao-term)
+MAO_LOG=debug cargo run -p mao-app   # verbose logs; WGPU_BACKEND=dx12|vulkan|gl forces a GPU backend
 cargo test --workspace               # tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all

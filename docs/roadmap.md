@@ -2,13 +2,23 @@
 
 Status: ⬜ pending · 🟨 in progress · ✅ done
 
-## M0 — Foundations ⬜
+## M0 — Foundations 🟨
 
-- ⬜ Cargo workspace with the crates from `design.md` (empty), `rust-toolchain.toml`, edition 2024.
-- ⬜ CI (GitHub Actions): fmt, clippy, test on `windows-latest` and `ubuntu-latest`. `cargo-deny` for licenses.
-- ⬜ winit + wgpu window that clears the screen with the theme background color.
-- ⬜ Minimal config loading (font, size, colors).
+- ✅ Cargo workspace with the crates from `design.md` (empty), `rust-toolchain.toml`, edition 2024.
+- ✅ CI (GitHub Actions): fmt, clippy, test on `windows-latest` and `ubuntu-latest`. `cargo-deny` for licenses. *(Not run yet: no remote.)*
+- ✅ winit + wgpu window that clears the screen with the theme background color.
+- ✅ Minimal config loading (font, size, colors).
 - ⬜ Spike: validate `alacritty_terminal::tty` with ConPTY on Windows (see ADR 0001).
+
+**M0 measurements** (release, Windows 11, Intel Iris Xe, empty window):
+
+| Metric | DX12 | Vulkan | GL |
+|---|---|---|---|
+| Startup to first frame (warm) | ~150 ms | ~125–155 ms | — |
+| Idle CPU (10 s) | 0.000% | 0.000% | 0.47% |
+| Working set / private | 106 / 100 MB | 113 / 69 MB | 104 / 38 MB |
+
+Cold start (first launch after build) ~300–500 ms due to driver shader caches. Most of the memory is the GPU driver: the RAM budget in `design.md` must be measured relative to this baseline.
 
 ## M1 — Minimal usable terminal ⬜
 
