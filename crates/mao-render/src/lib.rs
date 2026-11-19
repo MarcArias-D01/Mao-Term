@@ -86,6 +86,8 @@ struct Text {
     renderer: TextRenderer,
     /// UI text, drawn after the UI rectangles.
     ui_renderer: TextRenderer,
+    /// Text of the UI's top layer (menus, popups).
+    top_renderer: TextRenderer,
     ui: UiLayer,
 }
 
@@ -212,6 +214,8 @@ impl Renderer {
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let ui_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let top_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let ui = UiLayer::new(&font_system);
         let font = Font::new(&mut font_system, &font.family, font.size, font.scale);
         tracing::debug!(ms = t.elapsed().as_millis(), "startup: text pipeline ready");
@@ -232,6 +236,7 @@ impl Renderer {
                 viewport,
                 renderer: text_renderer,
                 ui_renderer,
+                top_renderer,
                 ui,
             },
             font,
@@ -253,6 +258,11 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+    }
+
+    /// Whether an icon font is installed (otherwise use plain-symbol fallbacks).
+    pub fn has_icon_font(&self) -> bool {
+        self.text.ui.has_icon_font()
     }
 
     pub fn cell_metrics(&self) -> CellMetrics {
@@ -333,9 +343,12 @@ impl Renderer {
                 self.surface.configure(&self.device, &self.config);
                 return Ok(FrameOutcome::Retry);
             }
-            wgpu::CurrentSurfaceTexture::Timeout
+            other @ (wgpu::CurrentSurfaceTexture::Timeout
             | wgpu::CurrentSurfaceTexture::Occluded
-            | wgpu::CurrentSurfaceTexture::Validation => return Ok(FrameOutcome::Skipped),
+            | wgpu::CurrentSurfaceTexture::Validation) => {
+                tracing::trace!(status = ?std::mem::discriminant(&other), "frame skipped");
+                return Ok(FrameOutcome::Skipped);
+            }
             wgpu::CurrentSurfaceTexture::Lost => {
                 // Happens e.g. after a driver reset or display change: rebuild the surface.
                 tracing::warn!("GPU surface lost, recreating it");
@@ -359,6 +372,7 @@ impl Renderer {
             viewport,
             renderer,
             ui_renderer,
+            top_renderer,
             ui: ui_layer,
         } = &mut self.text;
 
@@ -371,13 +385,14 @@ impl Renderer {
             }
         }
         let grid_quads = (self.instances.len() / quad::FLOATS_PER_QUAD) as u32;
-        ui_layer.update(
+        let top_start = ui_layer.update(
             font_system,
             self.font.family(),
             ui,
             self.srgb,
             &mut self.instances,
         );
+        let top_quads = (top_start / quad::FLOATS_PER_QUAD) as u32;
         let all_quads = (self.instances.len() / quad::FLOATS_PER_QUAD) as u32;
         self.quads
             .prepare(&self.device, &self.queue, (width, height), &self.instances);
@@ -410,6 +425,17 @@ impl Renderer {
             swash,
         ) {
             tracing::error!("UI text prepare failed: {e}");
+        }
+        if let Err(e) = top_renderer.prepare(
+            &self.device,
+            &self.queue,
+            font_system,
+            atlas,
+            viewport,
+            ui_layer.top_text_areas(ui),
+            swash,
+        ) {
+            tracing::error!("UI top text prepare failed: {e}");
         }
 
         let view = frame
@@ -444,9 +470,13 @@ impl Renderer {
             if let Err(e) = renderer.render(atlas, viewport, &mut pass) {
                 tracing::error!("grid text render failed: {e}");
             }
-            self.quads.draw(&mut pass, grid_quads..all_quads);
+            self.quads.draw(&mut pass, grid_quads..top_quads);
             if let Err(e) = ui_renderer.render(atlas, viewport, &mut pass) {
                 tracing::error!("UI text render failed: {e}");
+            }
+            self.quads.draw(&mut pass, top_quads..all_quads);
+            if let Err(e) = top_renderer.render(atlas, viewport, &mut pass) {
+                tracing::error!("UI top text render failed: {e}");
             }
         }
         self.queue.submit(std::iter::once(encoder.finish()));

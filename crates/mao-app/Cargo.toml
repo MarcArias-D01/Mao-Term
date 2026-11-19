@@ -16,6 +16,7 @@ anyhow.workspace = true
 arboard = "3.7.0"
 mao-complete.workspace = true
 mao-config.workspace = true
+mao-fs.workspace = true
 mao-input.workspace = true
 mao-render.workspace = true
 mao-terminal.workspace = true

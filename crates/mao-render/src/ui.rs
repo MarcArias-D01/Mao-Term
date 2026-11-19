@@ -45,20 +45,38 @@ pub struct UiText {
     pub bold: bool,
     /// Use the terminal (monospace) font instead of the UI font.
     pub mono: bool,
+    /// Use the icon font (see [`crate::Renderer::has_icon_font`]).
+    pub icon: bool,
     pub align: Align,
 }
 
-/// Everything the UI layer draws in one frame, in order (later items on top).
+/// Everything the UI draws in one frame. Within a layer all rectangles are
+/// drawn before all text; floating things (menus, palette) go in [`Self::top`]
+/// so that they cover the base layer's text.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UiFrame {
     pub rects: Vec<UiRect>,
     pub texts: Vec<UiText>,
+    /// The layer drawn above this one (only one level is rendered).
+    top: Option<Box<UiFrame>>,
 }
 
 impl UiFrame {
     pub fn clear(&mut self) {
         self.rects.clear();
         self.texts.clear();
+        if let Some(top) = self.top.as_mut() {
+            top.clear();
+        }
+    }
+
+    /// The overlay layer (menus, popups).
+    pub fn top(&mut self) -> &mut UiFrame {
+        self.top.get_or_insert_with(Box::default)
+    }
+
+    fn top_ref(&self) -> Option<&UiFrame> {
+        self.top.as_deref()
     }
 
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Rgb8) {
@@ -73,6 +91,7 @@ struct Cached {
     color: Rgb8,
     bold: bool,
     mono: bool,
+    icon: bool,
     width: f32,
     used: bool,
 }
@@ -87,29 +106,41 @@ const UI_FAMILIES: &[&str] = &[
     "DejaVu Sans",
 ];
 
+/// Icon fonts tried in order (Windows 10/11 ship them).
+const ICON_FAMILIES: &[&str] = &["Segoe Fluent Icons", "Segoe MDL2 Assets"];
+
 pub(crate) struct UiLayer {
     cache: HashMap<u64, Cached>,
     family: Option<String>,
+    icon_family: Option<String>,
 }
 
 impl UiLayer {
     pub(crate) fn new(font_system: &FontSystem) -> Self {
-        let family = UI_FAMILIES
-            .iter()
-            .find(|name| {
-                font_system
-                    .db()
-                    .faces()
-                    .any(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
-            })
-            .map(|s| (*s).to_owned());
+        let find = |names: &[&str]| {
+            names
+                .iter()
+                .find(|name| {
+                    font_system
+                        .db()
+                        .faces()
+                        .any(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
+                })
+                .map(|s| (*s).to_owned())
+        };
         Self {
             cache: HashMap::new(),
-            family,
+            family: find(UI_FAMILIES),
+            icon_family: find(ICON_FAMILIES),
         }
     }
 
-    /// Shapes changed labels and appends the frame's rectangles to `quads`.
+    pub(crate) fn has_icon_font(&self) -> bool {
+        self.icon_family.is_some()
+    }
+
+    /// Shapes changed labels and appends the base layer's rectangles to `quads`,
+    /// then the top layer's. Returns the length of `quads` where the top layer starts.
     pub(crate) fn update(
         &mut self,
         font_system: &mut FontSystem,
@@ -117,14 +148,24 @@ impl UiLayer {
         frame: &UiFrame,
         srgb: bool,
         quads: &mut Vec<f32>,
-    ) {
+    ) -> usize {
         for r in &frame.rects {
             push_quad(quads, r.x, r.y, r.w, r.h, to_target(r.color, srgb));
+        }
+        let top_start = quads.len();
+        if let Some(top) = frame.top_ref() {
+            for r in &top.rects {
+                push_quad(quads, r.x, r.y, r.w, r.h, to_target(r.color, srgb));
+            }
         }
         for c in self.cache.values_mut() {
             c.used = false;
         }
-        for t in &frame.texts {
+        let all_texts = frame
+            .texts
+            .iter()
+            .chain(frame.top_ref().into_iter().flat_map(|t| t.texts.iter()));
+        for t in all_texts {
             let line_height = (t.size * 1.3).ceil();
             let entry = self.cache.entry(t.key).or_insert_with(|| Cached {
                 buffer: Buffer::new_empty(Metrics::new(t.size, line_height)),
@@ -133,6 +174,7 @@ impl UiLayer {
                 color: [0; 3],
                 bold: false,
                 mono: false,
+                icon: false,
                 width: 0.0,
                 used: false,
             });
@@ -141,11 +183,16 @@ impl UiLayer {
                 || entry.size != t.size
                 || entry.color != t.color
                 || entry.bold != t.bold
-                || entry.mono != t.mono;
+                || entry.mono != t.mono
+                || entry.icon != t.icon;
             if !changed {
                 continue;
             }
-            let family = if t.mono {
+            let family = if t.icon && self.icon_family.is_some() {
+                self.icon_family
+                    .as_deref()
+                    .map_or(Family::SansSerif, Family::Name)
+            } else if t.mono {
                 mono_family.map_or(Family::Monospace, Family::Name)
             } else {
                 self.family
@@ -174,8 +221,21 @@ impl UiLayer {
             entry.color = t.color;
             entry.bold = t.bold;
             entry.mono = t.mono;
+            entry.icon = t.icon;
         }
         self.cache.retain(|_, c| c.used);
+        top_start
+    }
+
+    /// Text areas of the top layer.
+    pub(crate) fn top_text_areas<'a>(
+        &'a self,
+        frame: &'a UiFrame,
+    ) -> impl Iterator<Item = TextArea<'a>> {
+        frame
+            .top_ref()
+            .into_iter()
+            .flat_map(move |top| self.text_areas(top))
     }
 
     pub(crate) fn text_areas<'a>(

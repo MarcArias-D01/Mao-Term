@@ -9,6 +9,7 @@ mod input;
 mod overlay;
 mod palette;
 mod pane;
+mod sidebar;
 mod workspace;
 
 use std::time::Instant;

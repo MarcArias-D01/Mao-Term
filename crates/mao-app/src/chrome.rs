@@ -1,4 +1,5 @@
-//! Window chrome: tab bar, status bar, pane dividers and the command palette.
+//! Window chrome: activity bar, sidebar, tab bar, status bar, pane dividers,
+//! context menu and the command palette.
 //! Geometry (for hit-testing) and drawing (into a `UiFrame`).
 
 use mao_config::ThemeConfig;
@@ -7,6 +8,7 @@ use mao_ui::{Divider, PaneId, Rect};
 
 use crate::editor::{MENU_ROWS, Menu};
 use crate::palette::{MAX_VISIBLE, Palette};
+use crate::sidebar::{Panel, Sidebar};
 use crate::workspace::Workspace;
 
 /// Pixel sizes derived from the display scale.
@@ -20,6 +22,9 @@ pub struct Metrics {
     pub gap: f32,
     /// Padding inside each pane around the grid.
     pub pad: f32,
+    pub activity_bar: f32,
+    /// Height of a sidebar tree row.
+    pub row: f32,
 }
 
 impl Metrics {
@@ -32,17 +37,32 @@ impl Metrics {
             status_bar: px(24.0),
             gap: px(1.0).max(1.0),
             pad: px(padding),
+            activity_bar: px(46.0),
+            row: px(24.0),
         }
     }
 
-    fn px(&self, v: f32) -> f32 {
+    pub fn px(&self, v: f32) -> f32 {
         (v * self.scale).round()
     }
+}
+
+/// Buttons of the activity bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    Panel(Panel),
+    Settings,
 }
 
 /// Where things are in the window.
 #[derive(Debug, Clone, Default)]
 pub struct Layout {
+    pub activity: Rect,
+    pub activity_buttons: Vec<(Activity, Rect)>,
+    /// The sidebar, when open.
+    pub sidebar: Option<Rect>,
+    /// Part of the sidebar holding tree rows.
+    pub sidebar_rows: Rect,
     pub tab_bar: Rect,
     pub content: Rect,
     pub status: Rect,
@@ -51,12 +71,58 @@ pub struct Layout {
     pub plus: Rect,
 }
 
-impl Layout {
-    pub fn new(window: (u32, u32), m: &Metrics, tab_count: usize) -> Self {
-        let full = Rect::new(0.0, 0.0, window.0 as f32, window.1 as f32);
-        let (tab_bar, rest) = full.split_top(m.tab_bar);
-        let (content, status) = rest.split_bottom(m.status_bar);
+/// Height of the sidebar header (panel title + folder name).
+fn sidebar_header(m: &Metrics) -> f32 {
+    m.px(62.0)
+}
 
+impl Layout {
+    /// `sidebar_width` in physical pixels, `None` when closed.
+    pub fn new(
+        window: (u32, u32),
+        m: &Metrics,
+        tab_count: usize,
+        sidebar_width: Option<f32>,
+    ) -> Self {
+        let full = Rect::new(0.0, 0.0, window.0 as f32, window.1 as f32);
+        let (body, status) = full.split_bottom(m.status_bar);
+
+        let activity = Rect::new(body.x, body.y, m.activity_bar.min(body.w), body.h);
+        let b = m.activity_bar;
+        let mut activity_buttons: Vec<(Activity, Rect)> =
+            [Panel::Files, Panel::Agents, Panel::Monitor]
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    (
+                        Activity::Panel(p),
+                        Rect::new(activity.x, activity.y + m.px(4.0) + i as f32 * b, b, b),
+                    )
+                })
+                .collect();
+        activity_buttons.push((
+            Activity::Settings,
+            Rect::new(activity.x, activity.bottom() - b - m.px(4.0), b, b),
+        ));
+
+        let mut rest = Rect::new(
+            activity.right(),
+            body.y,
+            (body.w - activity.w).max(0.0),
+            body.h,
+        );
+        let sidebar = sidebar_width.map(|w| {
+            let w = w.min((rest.w - m.px(200.0)).max(0.0)).round();
+            let r = Rect::new(rest.x, rest.y, w, rest.h);
+            rest = Rect::new(r.right(), rest.y, (rest.w - w).max(0.0), rest.h);
+            r
+        });
+        let sidebar_rows = sidebar.map_or_else(Rect::default, |r| {
+            let (_, rows) = r.split_top(sidebar_header(m));
+            rows
+        });
+
+        let (tab_bar, content) = rest.split_top(m.tab_bar);
         let plus_w = m.tab_bar;
         let available = (tab_bar.w - plus_w - m.px(8.0)).max(0.0);
         let tab_w = if tab_count == 0 {
@@ -69,12 +135,21 @@ impl Layout {
         let mut tabs = Vec::with_capacity(tab_count);
         let mut closes = Vec::with_capacity(tab_count);
         for i in 0..tab_count {
-            let r = Rect::new(i as f32 * tab_w, 0.0, tab_w, tab_bar.h);
+            let r = Rect::new(tab_bar.x + i as f32 * tab_w, tab_bar.y, tab_w, tab_bar.h);
             closes.push(Rect::new(r.right() - close_w, r.y, close_w, r.h));
             tabs.push(r);
         }
-        let plus = Rect::new(tab_count as f32 * tab_w, 0.0, plus_w, tab_bar.h);
+        let plus = Rect::new(
+            tab_bar.x + tab_count as f32 * tab_w,
+            tab_bar.y,
+            plus_w,
+            tab_bar.h,
+        );
         Self {
+            activity,
+            activity_buttons,
+            sidebar,
+            sidebar_rows,
             tab_bar,
             content,
             status,
@@ -82,6 +157,95 @@ impl Layout {
             closes,
             plus,
         }
+    }
+
+    /// Tree rows that fit in the sidebar.
+    pub fn visible_rows(&self, m: &Metrics) -> usize {
+        (self.sidebar_rows.h / m.row).floor().max(0.0) as usize
+    }
+}
+
+/// Something to do with a file or folder from the context menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileAction {
+    Open,
+    Cd,
+    OpenInNewTab,
+    InsertPath,
+    CopyPath,
+    CopyRelativePath,
+    Reveal,
+}
+
+impl FileAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Open => "Open",
+            Self::Cd => "cd Here",
+            Self::OpenInNewTab => "Open in New Tab",
+            Self::InsertPath => "Insert Path in Terminal",
+            Self::CopyPath => "Copy Path",
+            Self::CopyRelativePath => "Copy Relative Path",
+            Self::Reveal => {
+                if cfg!(windows) {
+                    "Reveal in File Explorer"
+                } else {
+                    "Open Containing Folder"
+                }
+            }
+        }
+    }
+}
+
+/// Right-click menu on a tree entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextMenu {
+    pub x: f32,
+    pub y: f32,
+    pub target: std::path::PathBuf,
+    pub items: Vec<FileAction>,
+}
+
+impl ContextMenu {
+    pub fn new(x: f32, y: f32, target: std::path::PathBuf, is_dir: bool) -> Self {
+        use FileAction::*;
+        let items = if is_dir {
+            vec![
+                Cd,
+                OpenInNewTab,
+                InsertPath,
+                CopyPath,
+                CopyRelativePath,
+                Reveal,
+            ]
+        } else {
+            vec![Open, InsertPath, CopyPath, CopyRelativePath, Reveal]
+        };
+        Self {
+            x,
+            y,
+            target,
+            items,
+        }
+    }
+
+    fn geometry(&self, l: &Layout, m: &Metrics) -> (Rect, Vec<Rect>) {
+        let row_h = m.px(28.0);
+        let pad = m.px(4.0);
+        let w = m.px(230.0);
+        let h = self.items.len() as f32 * row_h + 2.0 * pad;
+        let win_w = l.status.right();
+        let win_h = l.status.y;
+        let x = self.x.min(win_w - w - m.px(4.0)).max(0.0);
+        let y = if self.y + h > win_h {
+            (self.y - h).max(0.0)
+        } else {
+            self.y
+        };
+        let rows = (0..self.items.len())
+            .map(|i| Rect::new(x + pad, y + pad + i as f32 * row_h, w - 2.0 * pad, row_h))
+            .collect();
+        (Rect::new(x, y, w, h), rows)
     }
 }
 
@@ -97,16 +261,46 @@ pub enum Hit {
     PaletteRow(usize),
     /// Inside the palette box but not on a row.
     Palette,
+    Activity(Activity),
+    /// Tree row, as an index into the visible rows (scroll applied).
+    SidebarRow(usize),
+    /// Elsewhere in the sidebar.
+    Sidebar,
+    /// The sidebar's right edge (drag to resize).
+    SidebarEdge,
+    ContextItem(usize),
+    /// Inside the context menu but not on an item.
+    Context,
 }
 
-pub fn hit_test(
-    x: f32,
-    y: f32,
-    layout: &Layout,
-    m: &Metrics,
-    ws: &Workspace,
-    palette: Option<&Palette>,
-) -> Hit {
+/// What hit-testing needs to know about the window.
+pub struct Scene<'a> {
+    pub layout: &'a Layout,
+    pub metrics: &'a Metrics,
+    pub workspace: &'a Workspace,
+    pub palette: Option<&'a Palette>,
+    pub context: Option<&'a ContextMenu>,
+    pub sidebar: &'a Sidebar,
+}
+
+pub fn hit_test(x: f32, y: f32, scene: &Scene<'_>) -> Hit {
+    let Scene {
+        layout,
+        metrics: m,
+        workspace: ws,
+        palette,
+        context,
+        sidebar,
+    } = *scene;
+    if let Some(menu) = context {
+        let (frame, rows) = menu.geometry(layout, m);
+        if frame.contains(x, y) {
+            return rows
+                .iter()
+                .position(|r| r.contains(x, y))
+                .map_or(Hit::Context, Hit::ContextItem);
+        }
+    }
     if let Some(p) = palette {
         let geo = PaletteGeometry::new(layout, m, p);
         if geo.frame.contains(x, y) {
@@ -115,6 +309,28 @@ pub fn hit_test(
                 .iter()
                 .position(|r| r.contains(x, y))
                 .map_or(Hit::Palette, Hit::PaletteRow);
+        }
+    }
+    if layout.activity.contains(x, y) {
+        return layout
+            .activity_buttons
+            .iter()
+            .find(|(_, r)| r.contains(x, y))
+            .map_or(Hit::None, |(a, _)| Hit::Activity(*a));
+    }
+    if let Some(sb) = layout.sidebar {
+        let grab = m.px(4.0);
+        if (x - sb.right()).abs() <= grab && y >= sb.y && y < sb.bottom() {
+            return Hit::SidebarEdge;
+        }
+        if sb.contains(x, y) {
+            if sidebar.panel == Panel::Files && layout.sidebar_rows.contains(x, y) {
+                let i = ((y - layout.sidebar_rows.y) / m.row) as usize + sidebar.files.scroll;
+                if i < sidebar.files.tree.rows().len() {
+                    return Hit::SidebarRow(i);
+                }
+            }
+            return Hit::Sidebar;
         }
     }
     if layout.tab_bar.contains(x, y) {
@@ -203,6 +419,47 @@ const KEY_PALETTE_SHORTCUT: u64 = 7 << 48;
 const KEY_MENU_LABEL: u64 = 8 << 48;
 const KEY_MENU_DETAIL: u64 = 9 << 48;
 const KEY_MENU_COUNT: u64 = 10 << 48;
+const KEY_ACTIVITY: u64 = 11 << 48;
+const KEY_SIDEBAR: u64 = 12 << 48;
+const KEY_TREE_NAME: u64 = 13 << 48;
+const KEY_TREE_CHEVRON: u64 = 14 << 48;
+const KEY_TREE_ICON: u64 = 15 << 48;
+const KEY_CONTEXT: u64 = 16 << 48;
+const KEY_DRAG: u64 = 17 << 48;
+
+/// Icon glyphs: Segoe Fluent/MDL2 code points, or plain fallbacks.
+struct Icons {
+    files: &'static str,
+    agents: &'static str,
+    monitor: &'static str,
+    settings: &'static str,
+    chevron_right: &'static str,
+    chevron_down: &'static str,
+    folder: &'static str,
+    file: &'static str,
+}
+
+const FONT_ICONS: Icons = Icons {
+    files: "\u{EC50}",
+    agents: "\u{E99A}",
+    monitor: "\u{E9D9}",
+    settings: "\u{E713}",
+    chevron_right: "\u{E76C}",
+    chevron_down: "\u{E70D}",
+    folder: "\u{E8B7}",
+    file: "\u{E8A5}",
+};
+
+const TEXT_ICONS: Icons = Icons {
+    files: "≡",
+    agents: "◎",
+    monitor: "◔",
+    settings: "⚙",
+    chevron_right: "▸",
+    chevron_down: "▾",
+    folder: "",
+    file: "",
+};
 
 /// The completion menu of the focused pane and where to put it.
 pub struct MenuView<'a> {
@@ -216,6 +473,12 @@ pub struct MenuView<'a> {
 }
 
 pub struct DrawState<'a> {
+    pub sidebar: &'a Sidebar,
+    /// An icon font is available.
+    pub icons: bool,
+    pub context: Option<&'a ContextMenu>,
+    /// Entry being dragged from the tree, and the pointer position.
+    pub drag: Option<(&'a str, f32, f32)>,
     pub layout: &'a Layout,
     pub metrics: &'a Metrics,
     pub colors: &'a Colors,
@@ -228,15 +491,269 @@ pub struct DrawState<'a> {
 
 pub fn draw(ui: &mut UiFrame, s: &DrawState<'_>) {
     ui.clear();
+    draw_activity_bar(ui, s);
+    if let Some(r) = s.layout.sidebar {
+        draw_sidebar(ui, s, r);
+    }
     draw_tab_bar(ui, s);
     draw_panes_decor(ui, s);
     draw_status(ui, s);
+    // Floating things go on the top layer so they cover the text below them.
+    let top = ui.top();
     if let Some(menu) = &s.menu {
-        draw_menu(ui, s, menu);
+        draw_menu(top, s, menu);
+    }
+    if let Some(menu) = s.context {
+        draw_context(top, s, menu);
+    }
+    if let Some((label, x, y)) = s.drag {
+        draw_drag(top, s, label, x, y);
     }
     if let Some(p) = s.palette {
-        draw_palette(ui, s, p);
+        draw_palette(top, s, p);
     }
+}
+
+fn icon(key: u64, glyph: &str, r: Rect, size: f32, color: Rgb8) -> UiText {
+    let mut t = text(key, glyph, r, size, color, Align::Center);
+    t.icon = true;
+    t
+}
+
+fn draw_activity_bar(ui: &mut UiFrame, s: &DrawState<'_>) {
+    let (l, m, c) = (s.layout, s.metrics, s.colors);
+    let a = l.activity;
+    ui.rect(a.x, a.y, a.w, a.h, mix(c.chrome, [0, 0, 0], 0.18));
+    let icons = if s.icons { &FONT_ICONS } else { &TEXT_ICONS };
+    for (i, (act, r)) in l.activity_buttons.iter().enumerate() {
+        let active =
+            matches!(act, Activity::Panel(p) if s.sidebar.visible && s.sidebar.panel == *p);
+        let hovered = *s.hover == Hit::Activity(*act);
+        if active {
+            ui.rect(r.x, r.y + m.px(8.0), m.px(2.0), r.h - m.px(16.0), c.accent);
+        }
+        let glyph = match act {
+            Activity::Panel(Panel::Files) => icons.files,
+            Activity::Panel(Panel::Agents) => icons.agents,
+            Activity::Panel(Panel::Monitor) => icons.monitor,
+            Activity::Settings => icons.settings,
+        };
+        let color = if active || hovered { c.fg } else { c.dim };
+        ui.texts
+            .push(icon(KEY_ACTIVITY | i as u64, glyph, *r, m.px(20.0), color));
+    }
+}
+
+fn draw_sidebar(ui: &mut UiFrame, s: &DrawState<'_>, r: Rect) {
+    let (l, m, c) = (s.layout, s.metrics, s.colors);
+    ui.rect(r.x, r.y, r.w, r.h, c.chrome);
+    let edge = if *s.hover == Hit::SidebarEdge {
+        c.accent
+    } else {
+        c.divider
+    };
+    ui.rect(r.right() - m.gap, r.y, m.gap, r.h, edge);
+
+    let pad = m.px(14.0);
+    let title = match s.sidebar.panel {
+        Panel::Files => "EXPLORER",
+        Panel::Agents => "AGENTS",
+        Panel::Monitor => "SYSTEM MONITOR",
+    };
+    let mut t = text(
+        KEY_SIDEBAR,
+        title,
+        Rect::new(r.x + pad, r.y + m.px(4.0), r.w - 2.0 * pad, m.px(28.0)),
+        m.ui_text * 0.85,
+        c.dim,
+        Align::Left,
+    );
+    t.bold = true;
+    ui.texts.push(t);
+
+    match s.sidebar.panel {
+        Panel::Files => draw_files(ui, s, r),
+        Panel::Agents | Panel::Monitor => {
+            ui.texts.push(text(
+                KEY_SIDEBAR | 1,
+                "Coming in milestone M6.",
+                Rect::new(r.x + pad, r.y + m.px(34.0), r.w - 2.0 * pad, m.px(24.0)),
+                m.ui_text,
+                c.dim,
+                Align::Left,
+            ));
+        }
+    }
+    let _ = l;
+}
+
+fn draw_files(ui: &mut UiFrame, s: &DrawState<'_>, r: Rect) {
+    let (l, m, c) = (s.layout, s.metrics, s.colors);
+    let files = &s.sidebar.files;
+    let icons = if s.icons { &FONT_ICONS } else { &TEXT_ICONS };
+    let pad = m.px(14.0);
+
+    // Folder name line.
+    let root_name = files.tree.root().map_or_else(String::new, |p| {
+        p.file_name().map_or_else(
+            || p.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    });
+    let suffix = if files.show_ignored {
+        "  (all files)"
+    } else {
+        ""
+    };
+    let mut t = text(
+        KEY_SIDEBAR | 2,
+        format!("{root_name}{suffix}"),
+        Rect::new(r.x + pad, r.y + m.px(32.0), r.w - 2.0 * pad, m.px(26.0)),
+        m.ui_text,
+        c.fg,
+        Align::Left,
+    );
+    t.bold = true;
+    ui.texts.push(t);
+
+    let area = l.sidebar_rows;
+    let rows = files.tree.rows();
+    if rows.is_empty() {
+        let msg = match files.tree.root_error() {
+            Some(e) => format!("Cannot read folder: {e}"),
+            None if files.tree.root().is_none() => {
+                "No folder (the shell hasn't reported one yet)".to_owned()
+            }
+            None => "Empty or loading…".to_owned(),
+        };
+        ui.texts.push(text(
+            KEY_SIDEBAR | 3,
+            msg,
+            Rect::new(area.x + pad, area.y, area.w - 2.0 * pad, m.row),
+            m.ui_text * 0.95,
+            c.dim,
+            Align::Left,
+        ));
+        return;
+    }
+
+    let visible = l.visible_rows(m);
+    for (slot, row) in rows.iter().enumerate().skip(files.scroll).take(visible) {
+        let y = area.y + (slot - files.scroll) as f32 * m.row;
+        let rr = Rect::new(area.x, y, area.w - m.gap, m.row);
+        let selected = files.selected.as_deref() == Some(row.entry.path.as_path());
+        let hovered = *s.hover == Hit::SidebarRow(slot);
+        if selected {
+            ui.rect(
+                rr.x,
+                rr.y,
+                rr.w,
+                rr.h,
+                if files.focused { c.selection } else { c.hover },
+            );
+        } else if hovered {
+            ui.rect(rr.x, rr.y, rr.w, rr.h, c.hover);
+        }
+        let k = (slot - files.scroll) as u64;
+        let mut x = rr.x + m.px(8.0) + row.depth as f32 * m.px(14.0);
+        let chevron_w = m.px(16.0);
+        if row.entry.is_dir {
+            let glyph = if row.expanded {
+                icons.chevron_down
+            } else {
+                icons.chevron_right
+            };
+            ui.texts.push(icon(
+                KEY_TREE_CHEVRON | k,
+                glyph,
+                Rect::new(x, rr.y, chevron_w, rr.h),
+                m.px(10.0),
+                c.dim,
+            ));
+        }
+        x += chevron_w;
+        let glyph = if row.entry.is_dir {
+            icons.folder
+        } else {
+            icons.file
+        };
+        if !glyph.is_empty() {
+            let color = if row.entry.is_dir { c.accent } else { c.dim };
+            ui.texts.push(icon(
+                KEY_TREE_ICON | k,
+                glyph,
+                Rect::new(x, rr.y, m.px(18.0), rr.h),
+                m.px(13.0),
+                color,
+            ));
+            x += m.px(22.0);
+        }
+        let name = if row.loading {
+            format!("{} …", row.entry.name)
+        } else {
+            row.entry.name.clone()
+        };
+        ui.texts.push(text(
+            KEY_TREE_NAME | k,
+            name,
+            Rect::new(x, rr.y, (rr.right() - x - m.px(6.0)).max(0.0), rr.h),
+            m.ui_text,
+            c.fg,
+            Align::Left,
+        ));
+    }
+
+    // Scrollbar.
+    if rows.len() > visible && visible > 0 {
+        let track = area.h;
+        let thumb = (track * visible as f32 / rows.len() as f32).max(m.px(20.0));
+        let y = area.y + (track - thumb) * files.scroll as f32 / (rows.len() - visible) as f32;
+        ui.rect(area.right() - m.px(6.0), y, m.px(4.0), thumb, c.divider);
+    }
+}
+
+fn draw_context(ui: &mut UiFrame, s: &DrawState<'_>, menu: &ContextMenu) {
+    let (m, c) = (s.metrics, s.colors);
+    let (frame, rows) = menu.geometry(s.layout, m);
+    let b = m.gap;
+    ui.rect(
+        frame.x - b,
+        frame.y - b,
+        frame.w + 2.0 * b,
+        frame.h + 2.0 * b,
+        c.divider,
+    );
+    ui.rect(frame.x, frame.y, frame.w, frame.h, c.raised);
+    for (i, (row, action)) in rows.iter().zip(&menu.items).enumerate() {
+        if *s.hover == Hit::ContextItem(i) {
+            ui.rect(row.x, row.y, row.w, row.h, c.selection);
+        }
+        let inner = Rect::new(row.x + m.px(10.0), row.y, row.w - m.px(20.0), row.h);
+        ui.texts.push(text(
+            KEY_CONTEXT | i as u64,
+            action.label(),
+            inner,
+            m.ui_text,
+            c.fg,
+            Align::Left,
+        ));
+    }
+}
+
+fn draw_drag(ui: &mut UiFrame, s: &DrawState<'_>, label: &str, x: f32, y: f32) {
+    let (m, c) = (s.metrics, s.colors);
+    let w = m.px(220.0);
+    let h = m.px(26.0);
+    let (x, y) = (x + m.px(12.0), y + m.px(8.0));
+    ui.rect(x, y, w, h, c.selection);
+    ui.texts.push(text(
+        KEY_DRAG,
+        label,
+        Rect::new(x + m.px(8.0), y, w - m.px(16.0), h),
+        m.ui_text,
+        c.fg,
+        Align::Left,
+    ));
 }
 
 fn text(
@@ -258,6 +775,7 @@ fn text(
         color,
         bold: false,
         mono: false,
+        icon: false,
         align,
     }
 }
@@ -628,19 +1146,26 @@ mod tests {
     #[test]
     fn layout_splits_window() {
         let m = Metrics::new(1.0, 8.0);
-        let l = Layout::new((1000, 600), &m, 3);
-        assert_eq!(l.tab_bar, Rect::new(0.0, 0.0, 1000.0, 36.0));
+        let l = Layout::new((1000, 600), &m, 3, None);
+        assert_eq!(l.activity, Rect::new(0.0, 0.0, 46.0, 576.0));
+        assert_eq!(l.tab_bar, Rect::new(46.0, 0.0, 954.0, 36.0));
         assert_eq!(l.status, Rect::new(0.0, 576.0, 1000.0, 24.0));
-        assert_eq!(l.content, Rect::new(0.0, 36.0, 1000.0, 540.0));
+        assert_eq!(l.content, Rect::new(46.0, 36.0, 954.0, 540.0));
         assert_eq!(l.tabs.len(), 3);
-        assert_eq!(l.tabs[0].w, 220.0);
-        assert_eq!(l.plus.x, 660.0);
+        assert_eq!(l.tabs[0].x, 46.0);
+        assert_eq!(l.plus.x, 46.0 + 660.0);
+        let with_sidebar = Layout::new((1000, 600), &m, 1, Some(250.0));
+        assert_eq!(
+            with_sidebar.sidebar,
+            Some(Rect::new(46.0, 0.0, 250.0, 576.0))
+        );
+        assert_eq!(with_sidebar.content.x, 296.0);
     }
 
     #[test]
     fn tabs_shrink_when_many() {
         let m = Metrics::new(1.0, 8.0);
-        let l = Layout::new((800, 600), &m, 20);
+        let l = Layout::new((800, 600), &m, 20, None);
         assert!(l.tabs[19].right() <= 800.0 - 36.0);
     }
 }

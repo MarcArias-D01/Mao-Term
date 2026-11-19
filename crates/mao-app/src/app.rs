@@ -20,12 +20,15 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::actions::Action;
-use crate::chrome::{self, Colors, DrawState, Hit, Layout, MenuView, Metrics};
+use crate::chrome::{
+    self, Activity, Colors, ContextMenu, DrawState, FileAction, Hit, Layout, MenuView, Metrics,
+};
 use crate::editor::{Ctx, Outcome};
 use crate::input;
 use crate::overlay::{self, OverlayColors};
 use crate::palette::Palette;
 use crate::pane::{Pane, ShellState, grid_for};
+use crate::sidebar::{Panel, RowAction, Sidebar};
 use crate::workspace::{Closed, Workspace};
 
 const MIN_FONT_SIZE: f32 = 6.0;
@@ -43,6 +46,17 @@ pub enum UserEvent {
     },
     /// Executables found on `PATH` (scanned in the background).
     Executables(Vec<String>),
+    /// File explorer listings.
+    Fs(mao_fs::FsEvent),
+}
+
+/// A tree entry being dragged (to drop its path on a terminal).
+struct TreeDrag {
+    path: PathBuf,
+    is_dir: bool,
+    start: PhysicalPosition<f64>,
+    /// Moved far enough to count as a drag.
+    active: bool,
 }
 
 /// Whether the app should keep running after handling something.
@@ -84,6 +98,11 @@ struct Win {
     overlay_colors: OverlayColors,
     /// Scratch row for compositing the editor overlay.
     row_buf: Vec<mao_render::GridCell>,
+    sidebar: Sidebar,
+    context: Option<ContextMenu>,
+    /// Dragging the sidebar's edge.
+    sidebar_resize: bool,
+    tree_drag: Option<TreeDrag>,
 }
 
 pub struct App {
@@ -178,7 +197,7 @@ impl App {
                 let _ = proxy.send_event(UserEvent::Executables(names));
             });
         let mut win = Win {
-            layout: Layout::new((size.width, size.height), &metrics, 1),
+            layout: Layout::new((size.width, size.height), &metrics, 1, None),
             metrics,
             colors: Colors::new(&self.config.theme),
             window,
@@ -204,6 +223,10 @@ impl App {
             editor_enabled: self.config.input.editor,
             overlay_colors: OverlayColors::new(&self.config.theme),
             row_buf: Vec::new(),
+            sidebar: Sidebar::default(),
+            context: None,
+            sidebar_resize: false,
+            tree_drag: None,
         };
         win.new_tab(&self.config)?;
         tracing::debug!(ms = t.elapsed().as_millis(), "startup: shell spawned");
@@ -247,10 +270,203 @@ impl Win {
         self.renderer.cell_metrics()
     }
 
+    /// Sidebar width in physical pixels, if open.
+    fn sidebar_px(&self) -> Option<f32> {
+        self.sidebar
+            .visible
+            .then_some(self.sidebar.width * self.scale)
+    }
+
+    /// Keeps the file explorer pointed at the focused pane's folder, and its
+    /// service running only while it is on screen.
+    fn sync_sidebar(&mut self) {
+        if !self.sidebar.files_active() {
+            self.sidebar.files.deactivate();
+            return;
+        }
+        let root = self.current_cwd().or_else(|| {
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+        });
+        if let Some(root) = root {
+            let proxy = self.proxy.clone();
+            self.sidebar.files.activate(&root, move || {
+                mao_fs::FsService::new(move |e| {
+                    let _ = proxy.send_event(UserEvent::Fs(e));
+                })
+            });
+        }
+    }
+
+    fn set_sidebar(&mut self, config: &Config, visible: bool, panel: Panel) {
+        self.sidebar.visible = visible;
+        self.sidebar.panel = panel;
+        if !visible {
+            self.sidebar.files.focused = false;
+        }
+        self.relayout(config.terminal.padding);
+    }
+
+    /// Writes `path` (quoted for the focused shell) where the user is typing.
+    fn insert_path(&mut self, config: &Config, path: &std::path::Path) {
+        let Some(id) = self.ws.focused_id() else {
+            return;
+        };
+        let engine = &self.engine;
+        let Some(pane) = self.ws.panes.get_mut(&id) else {
+            return;
+        };
+        // Relative to the shell's folder when inside it: shorter and what you'd type.
+        let shown = pane
+            .cwd
+            .as_deref()
+            .and_then(|cwd| path.strip_prefix(cwd).ok())
+            .filter(|rel| !rel.as_os_str().is_empty())
+            .unwrap_or(path);
+        let text = pane.quoting().quote(&shown.display().to_string());
+        if pane.editor_active(config.input.editor) {
+            let ctx = Ctx {
+                engine,
+                cwd: pane.cwd.as_deref(),
+                quoting: pane.quoting(),
+                suggestions: config.input.suggestions,
+            };
+            pane.editor.insert(&format!("{text} "), ctx);
+        } else {
+            pane.terminal.paste(&format!("{text} "));
+        }
+        self.sidebar.files.focused = false;
+        self.window.request_redraw();
+    }
+
+    /// Runs `cd <dir>` in the focused pane, if its shell is at the prompt.
+    fn cd_into(&mut self, config: &Config, dir: &std::path::Path) {
+        let Some(id) = self.ws.focused_id() else {
+            return;
+        };
+        let Some(pane) = self.ws.panes.get(&id) else {
+            return;
+        };
+        if !pane.editor_active(config.input.editor) {
+            tracing::info!("not at a prompt; not running cd");
+            return;
+        }
+        let line = format!("cd {}", pane.quoting().quote(&dir.display().to_string()));
+        self.submit(id, &line);
+    }
+
+    fn file_action(&mut self, config: &Config, action: FileAction, path: &std::path::Path) {
+        let relative = || {
+            self.sidebar
+                .files
+                .tree
+                .root()
+                .and_then(|r| path.strip_prefix(r).ok())
+                .map_or_else(|| path.display().to_string(), |p| p.display().to_string())
+        };
+        match action {
+            FileAction::Open => {
+                if let Err(e) = mao_fs::open_with_default_app(path) {
+                    tracing::warn!("cannot open {}: {e}", path.display());
+                }
+            }
+            FileAction::Cd => self.cd_into(config, path),
+            FileAction::OpenInNewTab => {
+                let id = self.ws.next_id();
+                let layout = Layout::new(
+                    self.renderer.size(),
+                    &self.metrics,
+                    self.ws.tabs.len() + 1,
+                    self.sidebar_px(),
+                );
+                let grid = grid_for(layout.content, self.metrics.pad, self.cell());
+                match self.spawn(config, id, grid, Some(path.to_path_buf())) {
+                    Ok(terminal) => {
+                        self.ws.add_tab(Pane::new(id, terminal));
+                        self.relayout(config.terminal.padding);
+                        self.update_title();
+                    }
+                    Err(e) => tracing::error!("failed to open a tab: {e:#}"),
+                }
+            }
+            FileAction::InsertPath => self.insert_path(config, path),
+            FileAction::CopyPath | FileAction::CopyRelativePath => {
+                let text = if action == FileAction::CopyPath {
+                    path.display().to_string()
+                } else {
+                    relative()
+                };
+                if let Some(clipboard) = self.clipboard.as_mut() {
+                    let _ = clipboard.set_text(text);
+                }
+            }
+            FileAction::Reveal => {
+                if let Err(e) = mao_fs::reveal_in_file_manager(path) {
+                    tracing::warn!("cannot reveal {}: {e}", path.display());
+                }
+            }
+        }
+    }
+
+    /// Keys while the file tree has focus. Returns `false` to fall through.
+    fn on_tree_key(&mut self, config: &Config, event: &KeyEvent) -> bool {
+        let visible = self.layout.visible_rows(&self.metrics);
+        let files = &mut self.sidebar.files;
+        match &event.logical_key {
+            Key::Named(NamedKey::ArrowDown) => {
+                files.move_selection(1, visible);
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                files.move_selection(-1, visible);
+            }
+            Key::Named(NamedKey::PageDown) => {
+                files.move_selection(visible as isize, visible);
+            }
+            Key::Named(NamedKey::PageUp) => {
+                files.move_selection(-(visible as isize), visible);
+            }
+            Key::Named(NamedKey::ArrowRight) => files.expand_selected(true, visible),
+            Key::Named(NamedKey::ArrowLeft) => files.expand_selected(false, visible),
+            Key::Named(NamedKey::Escape) => files.focused = false,
+            Key::Named(NamedKey::Enter) => {
+                let Some(sel) = files.selected.clone() else {
+                    return true;
+                };
+                let is_dir = files
+                    .row_paths()
+                    .iter()
+                    .find(|(p, _)| *p == sel)
+                    .is_some_and(|(_, d)| *d);
+                let ctrl = self.modifiers.control_key();
+                match (is_dir, ctrl) {
+                    (true, true) => self.cd_into(config, &sel),
+                    (true, false) => self.sidebar.files.toggle(&sel),
+                    (false, true) => self.insert_path(config, &sel),
+                    (false, false) => self.file_action(config, FileAction::Open, &sel),
+                }
+            }
+            _ => {
+                let mods = input::modifiers(self.modifiers);
+                match event.text.as_deref() {
+                    Some(t) if !mods.ctrl && !t.chars().any(char::is_control) => {
+                        files.type_ahead(t, visible);
+                    }
+                    _ => return false,
+                }
+            }
+        }
+        self.window.request_redraw();
+        true
+    }
+
     /// Recomputes chrome and pane geometry for every tab and resizes the PTYs.
     fn relayout(&mut self, padding: f32) {
         self.metrics = Metrics::new(self.scale, padding);
-        self.layout = Layout::new(self.renderer.size(), &self.metrics, self.ws.tabs.len());
+        self.layout = Layout::new(
+            self.renderer.size(),
+            &self.metrics,
+            self.ws.tabs.len(),
+            self.sidebar_px(),
+        );
         let cell = self.cell();
         let (content, gap, pad) = (self.layout.content, self.metrics.gap, self.metrics.pad);
         for tab in &self.ws.tabs {
@@ -293,7 +509,12 @@ impl Win {
     fn new_tab(&mut self, config: &Config) -> anyhow::Result<()> {
         let id = self.ws.next_id();
         // Size the shell for the content area right away.
-        let layout = Layout::new(self.renderer.size(), &self.metrics, self.ws.tabs.len() + 1);
+        let layout = Layout::new(
+            self.renderer.size(),
+            &self.metrics,
+            self.ws.tabs.len() + 1,
+            self.sidebar_px(),
+        );
         let grid = grid_for(layout.content, self.metrics.pad, self.cell());
         let cwd = self.current_cwd();
         let terminal = self.spawn(config, id, grid, cwd)?;
@@ -498,6 +719,36 @@ impl Win {
                     self.window.request_redraw();
                 }
             }
+            Action::ToggleSidebar => {
+                let panel = self.sidebar.panel;
+                self.set_sidebar(config, !self.sidebar.visible, panel);
+            }
+            Action::ShowPanel(panel) => {
+                // Shown and focused → hide; otherwise show it and focus the tree.
+                let showing = self.sidebar.visible && self.sidebar.panel == panel;
+                if showing && (panel != Panel::Files || self.sidebar.files.focused) {
+                    self.set_sidebar(config, false, panel);
+                } else {
+                    self.set_sidebar(config, true, panel);
+                    self.sidebar.files.focused = panel == Panel::Files;
+                }
+            }
+            Action::ToggleIgnoredFiles => {
+                self.sidebar.files.toggle_ignored();
+                self.window.request_redraw();
+            }
+            Action::CollapseFolders => {
+                self.sidebar.files.collapse_all();
+                self.window.request_redraw();
+            }
+            Action::OpenSettings => match mao_config::ensure_config_file() {
+                Ok(path) => {
+                    if let Err(e) = mao_fs::open_with_default_app(&path) {
+                        tracing::warn!("cannot open {}: {e}", path.display());
+                    }
+                }
+                Err(e) => tracing::error!("cannot create the config file: {e}"),
+            },
             Action::Quit => return Flow::Quit,
         }
         Flow::Continue
@@ -509,6 +760,20 @@ impl Win {
         }
         if self.palette.is_some() {
             return self.on_palette_key(config, event);
+        }
+        if self.context.is_some() {
+            if event.logical_key == Key::Named(NamedKey::Escape) {
+                self.context = None;
+                self.window.request_redraw();
+            }
+            return Flow::Continue;
+        }
+        if self.sidebar.files_active()
+            && self.sidebar.files.focused
+            && input::action_for(event, input::modifiers(self.modifiers)).is_none()
+            && self.on_tree_key(config, event)
+        {
+            return Flow::Continue;
         }
         let mods = input::modifiers(self.modifiers);
         let editor_on = self
@@ -714,10 +979,14 @@ impl Win {
         chrome::hit_test(
             self.cursor.x as f32,
             self.cursor.y as f32,
-            &self.layout,
-            &self.metrics,
-            &self.ws,
-            self.palette.as_ref(),
+            &chrome::Scene {
+                layout: &self.layout,
+                metrics: &self.metrics,
+                workspace: &self.ws,
+                palette: self.palette.as_ref(),
+                context: self.context.as_ref(),
+                sidebar: &self.sidebar,
+            },
         )
     }
 
@@ -727,10 +996,15 @@ impl Win {
             Hit::Divider(d) if d.dir == SplitDir::Right => CursorIcon::ColResize,
             Hit::Divider(_) => CursorIcon::RowResize,
             Hit::Pane(_) => CursorIcon::Text,
-            Hit::Tab(_) | Hit::CloseTab(_) | Hit::NewTab | Hit::PaletteRow(_) => {
-                CursorIcon::Pointer
-            }
-            Hit::None | Hit::Palette => CursorIcon::Default,
+            Hit::SidebarEdge => CursorIcon::ColResize,
+            Hit::Tab(_)
+            | Hit::CloseTab(_)
+            | Hit::NewTab
+            | Hit::PaletteRow(_)
+            | Hit::Activity(_)
+            | Hit::ContextItem(_)
+            | Hit::SidebarRow(_) => CursorIcon::Pointer,
+            Hit::None | Hit::Palette | Hit::Sidebar | Hit::Context => CursorIcon::Default,
         };
         if icon != self.cursor_icon {
             self.cursor_icon = icon;
@@ -746,6 +1020,23 @@ impl Win {
 
     fn on_cursor_moved(&mut self, config: &Config, pos: PhysicalPosition<f64>) {
         self.cursor = pos;
+        if self.sidebar_resize {
+            let x = pos.x as f32 - self.layout.activity.right();
+            self.sidebar.width =
+                (x / self.scale).clamp(crate::sidebar::MIN_WIDTH, crate::sidebar::MAX_WIDTH);
+            self.relayout(config.terminal.padding);
+            return;
+        }
+        if let Some(drag) = self.tree_drag.as_mut() {
+            let moved = (pos.x - drag.start.x).hypot(pos.y - drag.start.y);
+            if moved > f64::from(6.0 * self.scale) {
+                drag.active = true;
+            }
+            if drag.active {
+                self.window.request_redraw();
+            }
+            return;
+        }
         if let Some(d) = self.drag.clone() {
             if let Some(tab) = self.ws.active_tab_mut() {
                 tab.tree.drag_divider(&d, pos.x as f32, pos.y as f32);
@@ -780,6 +1071,24 @@ impl Win {
         let (cell, mods) = (self.cell(), input::modifiers(self.modifiers));
         if state == ElementState::Released {
             self.drag = None;
+            self.sidebar_resize = false;
+            if let Some(drag) = self.tree_drag.take() {
+                if drag.active {
+                    // Dropped on a terminal: insert the path there.
+                    if let Hit::Pane(id) = self.hit() {
+                        self.ws.focus(id);
+                        self.insert_path(config, &drag.path);
+                    }
+                } else if button == MouseButton::Left {
+                    match self.sidebar.files.click(&drag.path, drag.is_dir) {
+                        RowAction::None => {}
+                        RowAction::Open(path) => self.file_action(config, FileAction::Open, &path),
+                        RowAction::Cd(path) => self.cd_into(config, &path),
+                    }
+                }
+                self.window.request_redraw();
+                return Flow::Continue;
+            }
             if let Some(id) = self.capture
                 && let Some(pane) = self.ws.panes.get_mut(&id)
             {
@@ -801,6 +1110,15 @@ impl Win {
         }
 
         let hit = self.hit();
+        if let Some(menu) = self.context.take() {
+            if let Hit::ContextItem(i) = hit
+                && let Some(&action) = menu.items.get(i)
+            {
+                self.file_action(config, action, &menu.target);
+            }
+            self.window.request_redraw();
+            return Flow::Continue;
+        }
         if self.palette.is_some() {
             match hit {
                 Hit::PaletteRow(i) => {
@@ -829,7 +1147,44 @@ impl Win {
             | (Hit::CloseTab(i), MouseButton::Left) => return self.close_tab(config, i),
             (Hit::NewTab, MouseButton::Left) => return self.run(config, Action::NewTab),
             (Hit::Divider(d), MouseButton::Left) => self.drag = Some(d),
+            (Hit::Activity(Activity::Panel(panel)), MouseButton::Left) => {
+                let show = !(self.sidebar.visible && self.sidebar.panel == panel);
+                self.set_sidebar(config, show, panel);
+            }
+            (Hit::Activity(Activity::Settings), MouseButton::Left) => {
+                return self.run(config, Action::OpenSettings);
+            }
+            (Hit::SidebarEdge, MouseButton::Left) => self.sidebar_resize = true,
+            (Hit::SidebarRow(i), MouseButton::Left | MouseButton::Right) => {
+                let rows = self.sidebar.files.row_paths();
+                if let Some((path, is_dir)) = rows.get(i).cloned() {
+                    self.sidebar.files.focused = true;
+                    self.sidebar.files.selected = Some(path.clone());
+                    if button == MouseButton::Right {
+                        self.context = Some(ContextMenu::new(
+                            self.cursor.x as f32,
+                            self.cursor.y as f32,
+                            path,
+                            is_dir,
+                        ));
+                    } else {
+                        // Resolved on release: a click, or a drag onto a terminal.
+                        self.tree_drag = Some(TreeDrag {
+                            path,
+                            is_dir,
+                            start: self.cursor,
+                            active: false,
+                        });
+                    }
+                    self.window.request_redraw();
+                }
+            }
+            (Hit::Sidebar, _) => {
+                self.sidebar.files.focused = self.sidebar.panel == Panel::Files;
+                self.window.request_redraw();
+            }
             (Hit::Pane(id), _) => {
+                self.sidebar.files.focused = false;
                 if self.ws.focused_id() != Some(id) {
                     self.ws.focus(id);
                     self.update_title();
@@ -858,7 +1213,21 @@ impl Win {
 
     fn on_wheel(&mut self, delta: winit::event::MouseScrollDelta) {
         let (cell, mods, pos) = (self.cell(), input::modifiers(self.modifiers), self.cursor);
-        if let Hit::Pane(id) = self.hit()
+        let hit = self.hit();
+        if matches!(hit, Hit::SidebarRow(_) | Hit::Sidebar) {
+            let rows = match delta {
+                winit::event::MouseScrollDelta::LineDelta(_, y) => -(y * 3.0) as isize,
+                winit::event::MouseScrollDelta::PixelDelta(p) => {
+                    -(p.y as f32 / self.metrics.row) as isize
+                }
+            };
+            let visible = self.layout.visible_rows(&self.metrics);
+            self.sidebar.files.scroll_by(rows, visible);
+            self.update_hover();
+            self.window.request_redraw();
+            return;
+        }
+        if let Hit::Pane(id) = hit
             && let Some(pane) = self.ws.panes.get_mut(&id)
             && pane.on_wheel(delta, pos, cell, mods)
         {
@@ -920,6 +1289,7 @@ impl Win {
     }
 
     fn draw(&mut self, background: [u8; 3]) -> Result<FrameOutcome, mao_render::RenderError> {
+        self.sync_sidebar();
         self.visible.clear();
         let cell = self.cell();
         let editor_enabled = self.editor_enabled;
@@ -1003,6 +1373,12 @@ impl Win {
                 });
             }
         }
+        let drag_label = self.tree_drag.as_ref().filter(|d| d.active).map(|d| {
+            d.path.file_name().map_or_else(
+                || d.path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            )
+        });
         let menu = self.ws.focused_pane().and_then(|p| {
             let menu = p.editor.menu.as_ref()?;
             let (x, below, above) = p.menu_anchor?;
@@ -1024,6 +1400,12 @@ impl Win {
                 hover: &self.hover,
                 window_focused: self.focused,
                 menu,
+                sidebar: &self.sidebar,
+                icons: self.renderer.has_icon_font(),
+                context: self.context.as_ref(),
+                drag: drag_label
+                    .as_deref()
+                    .map(|l| (l, self.cursor.x as f32, self.cursor.y as f32)),
             },
         );
         self.renderer.render(background, &self.visible, &self.ui)
@@ -1072,6 +1454,10 @@ impl ApplicationHandler<UserEvent> for App {
                 session,
                 event,
             } => w.on_terminal_event(pane, session, event),
+            UserEvent::Fs(event) => {
+                w.sidebar.files.on_event(event);
+                w.window.request_redraw();
+            }
             UserEvent::Executables(names) => {
                 tracing::debug!(count = names.len(), "PATH executables scanned");
                 w.engine.set_executables(names);

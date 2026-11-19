@@ -18,7 +18,7 @@
 | [workspace-layout](specs/workspace-layout.md) | M2 | In progress |
 | [shell-integration](specs/shell-integration.md) | M3 | In progress |
 | [input-autocomplete](specs/input-autocomplete.md) | M3 | In progress |
-| [file-tree](specs/file-tree.md) | M4 | Draft |
+| [file-tree](specs/file-tree.md) | M4 | In progress |
 | [document-viewer](specs/document-viewer.md) | M5 | Draft |
 | [agents-panel](specs/agents-panel.md) | M6 | Draft |
 | [system-monitor](specs/system-monitor.md) | M6 | Draft |

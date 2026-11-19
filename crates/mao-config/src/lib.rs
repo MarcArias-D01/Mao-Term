@@ -234,6 +234,53 @@ pub fn data_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "mao-term").map(|d| d.data_local_dir().to_owned())
 }
 
+/// Starting point written by [`ensure_config_file`]: every option, commented out.
+pub const CONFIG_TEMPLATE: &str = r##"# Mao-Term configuration. Every value below is the default; uncomment to change.
+# Saved changes apply the next time Mao-Term starts.
+
+# [font]
+# family = "JetBrains Mono"   # falls back to Cascadia Mono, Consolas, DejaVu Sans Mono…
+# size = 13.0                 # points
+
+# [window]
+# width = 1100
+# height = 700
+
+# [terminal]
+# scrollback = 10000
+# padding = 8.0
+
+# [shell]
+# program = "pwsh.exe"        # default: pwsh → powershell (Windows), $SHELL (Linux)
+# args = ["-NoLogo"]
+# integration = true          # prompt marks + cwd, needed by the input editor
+
+# [input]
+# editor = true               # Mao-Term's own line editor at the prompt
+# suggestions = true          # history ghost text
+
+# [theme]
+# background = "#14161b"
+# foreground = "#d8dee9"
+# cursor = "#8ab4f8"
+# selection = "#2e3a55"
+# ansi = ["#1d2027", "#f2777a", "#99cc99", "#ffcc66", "#6699cc", "#cc99cc", "#66cccc", "#d8dee9",
+#         "#5c6370", "#ff8f8f", "#b5e8a0", "#ffe08a", "#8ab4f8", "#e0b0ff", "#8be9fd", "#ffffff"]
+"##;
+
+/// Returns the config file path, creating it from [`CONFIG_TEMPLATE`] if missing.
+pub fn ensure_config_file() -> std::io::Result<PathBuf> {
+    let path = config_file_path()
+        .ok_or_else(|| std::io::Error::other("no config directory on this system"))?;
+    if !path.exists() {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, CONFIG_TEMPLATE)?;
+    }
+    Ok(path)
+}
+
 /// Full path of the user config file.
 pub fn config_file_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join(CONFIG_FILE_NAME))
@@ -269,6 +316,25 @@ mod tests {
     #[test]
     fn unknown_keys_are_rejected() {
         assert!(Config::from_toml("[font]\nsise = 12.0").is_err());
+    }
+
+    #[test]
+    fn template_is_the_defaults() {
+        // Uncommenting everything must give exactly the defaults.
+        let uncommented: String = CONFIG_TEMPLATE
+            .lines()
+            .map(|l| l.strip_prefix("# ").unwrap_or(""))
+            .filter(|l| !l.starts_with(char::is_uppercase) && !l.starts_with("Saved"))
+            .map(|l| l.split(" #").next().unwrap_or(l))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        let mut expected = Config::default();
+        expected.shell.program = Some("pwsh.exe".into());
+        expected.shell.args = vec!["-NoLogo".into()];
+        assert_eq!(Config::from_toml(&uncommented).unwrap(), expected);
     }
 
     #[test]

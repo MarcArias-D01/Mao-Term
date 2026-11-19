@@ -2,6 +2,8 @@
 
 use mao_ui::Direction;
 
+use crate::sidebar::Panel;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     CommandPalette,
@@ -27,6 +29,12 @@ pub enum Action {
     ScrollPageDown,
     ScrollToTop,
     ScrollToBottom,
+    ToggleSidebar,
+    /// Show (or hide, if already shown) a sidebar panel.
+    ShowPanel(Panel),
+    ToggleIgnoredFiles,
+    CollapseFolders,
+    OpenSettings,
     Quit,
 }
 
@@ -58,6 +66,13 @@ impl Action {
             Self::ScrollPageDown => "Scroll Page Down",
             Self::ScrollToTop => "Scroll to Top",
             Self::ScrollToBottom => "Scroll to Bottom",
+            Self::ToggleSidebar => "Toggle Sidebar",
+            Self::ShowPanel(Panel::Files) => "Show File Explorer",
+            Self::ShowPanel(Panel::Agents) => "Show Agents",
+            Self::ShowPanel(Panel::Monitor) => "Show System Monitor",
+            Self::ToggleIgnoredFiles => "Toggle Ignored Files in Explorer",
+            Self::CollapseFolders => "Collapse Folders in Explorer",
+            Self::OpenSettings => "Open Settings File",
             Self::Quit => "Quit Mao-Term",
         }
     }
@@ -88,7 +103,12 @@ impl Action {
             Self::ScrollPageDown => "Shift+PgDn",
             Self::ScrollToTop => "Shift+Home",
             Self::ScrollToBottom => "Shift+End",
-            Self::CloseTab | Self::Quit => "",
+            Self::ToggleSidebar => "Ctrl+Shift+B",
+            Self::ShowPanel(Panel::Files) => "Ctrl+Shift+1",
+            Self::ShowPanel(Panel::Agents) => "Ctrl+Shift+2",
+            Self::ShowPanel(Panel::Monitor) => "Ctrl+Shift+3",
+            Self::OpenSettings => "Ctrl+,",
+            Self::CloseTab | Self::Quit | Self::ToggleIgnoredFiles | Self::CollapseFolders => "",
         }
     }
 }
@@ -116,5 +136,12 @@ pub const PALETTE: &[Action] = &[
     Action::ScrollPageDown,
     Action::ScrollToTop,
     Action::ScrollToBottom,
+    Action::ShowPanel(Panel::Files),
+    Action::ToggleSidebar,
+    Action::ToggleIgnoredFiles,
+    Action::CollapseFolders,
+    Action::ShowPanel(Panel::Agents),
+    Action::ShowPanel(Panel::Monitor),
+    Action::OpenSettings,
     Action::Quit,
 ];

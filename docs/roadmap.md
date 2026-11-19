@@ -69,11 +69,16 @@ Next steps for startup: create the GPU device in parallel with window creation a
 - ⬜ Shell aliases/functions as completion candidates; importer for Fig specs.
 - ⬜ Verify bash/zsh/fish on Linux.
 
-## M4 — Sidebar + file tree ⬜
+## M4 — Sidebar + file tree 🟨
 
-- ⬜ Activity bar + collapsible sidebar.
-- ⬜ File tree that follows the cwd of the focused pane.
-- ⬜ Actions: open in viewer, `cd`, copy path, insert path into the input.
+- ✅ Activity bar (Files, Agents, Monitor, Settings; Segoe Fluent/MDL2 icons with plain fallbacks) and collapsible, resizable sidebar (`Ctrl+Shift+B`, `Ctrl+Shift+1/2/3`).
+- ✅ `mao-fs`: listing on a worker thread, `.gitignore`-aware (toggle from the palette), natural sort, watchers only on visible folders with debounced re-listing. Closed sidebar = no threads, no watchers (measured: idle CPU 0%, +2 threads only while open).
+- ✅ Tree follows the focused pane's cwd; lazy expansion, keyboard navigation (arrows, Enter, `Ctrl+Enter` = cd/insert path, type-ahead), mouse wheel, scrollbar.
+- ✅ Actions: double click (open with default app / `cd` into folder), drag onto a terminal inserts the path (relative to the shell's folder when possible), context menu (open, cd here, open in new tab, insert/copy path, copy relative path, reveal in file explorer).
+- ✅ Settings button / `Ctrl+,` opens the config file (created from a commented template).
+- ✅ UI top layer so menus and popups cover the text below them.
+- ⬜ Per-file git status, file-type icons, "pin root" / repo-root option, filter-as-you-type (today: type-ahead jump), persist sidebar width.
+- ⬜ Open files in the document viewer (M5; today: default app).
 
 ## M5 — Document viewer ⬜
 

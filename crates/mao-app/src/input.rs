@@ -7,6 +7,7 @@ use winit::keyboard::{Key as WKey, ModifiersState, NamedKey as WNamed};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 use crate::actions::Action;
+use crate::sidebar::Panel;
 
 pub fn modifiers(state: ModifiersState) -> Modifiers {
     Modifiers {
@@ -33,6 +34,11 @@ pub fn action_for(event: &KeyEvent, mods: Modifiers) -> Option<Action> {
                 "w" if ctrl_shift => Action::ClosePane,
                 "d" if ctrl_shift => Action::SplitRight,
                 "e" if ctrl_shift => Action::SplitDown,
+                "b" if ctrl_shift => Action::ToggleSidebar,
+                "1" if ctrl_shift => Action::ShowPanel(Panel::Files),
+                "2" if ctrl_shift => Action::ShowPanel(Panel::Agents),
+                "3" if ctrl_shift => Action::ShowPanel(Panel::Monitor),
+                "," if ctrl_only => Action::OpenSettings,
                 "c" if ctrl_shift => Action::Copy,
                 "v" if ctrl_shift => Action::Paste,
                 "c" if ctrl_only => Action::CopyOrInterrupt,

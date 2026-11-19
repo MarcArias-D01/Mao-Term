@@ -1,6 +1,6 @@
 # Spec: File tree (sidebar)
 
-- **Status:** Draft
+- **Status:** In progress
 - **Milestone:** M4
 - **Crates:** `mao-fs`, `mao-ui`, `mao-app`
 - **Related:** [workspace-layout](workspace-layout.md), [shell-integration](shell-integration.md), [document-viewer](document-viewer.md)
