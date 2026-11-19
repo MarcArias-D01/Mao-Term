@@ -4,6 +4,7 @@
 //! RGB cells through [`Terminal::render`]. See `docs/specs/terminal-core.md`.
 
 pub mod keys;
+pub mod mouse;
 mod palette;
 mod platform;
 
@@ -22,7 +23,7 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{self, Term, TermDamage, TermMode};
 use alacritty_terminal::tty::{self, Shell};
-use alacritty_terminal::vte::ansi::CursorShape as VtCursorShape;
+use alacritty_terminal::vte::ansi::{CursorShape as VtCursorShape, Processor};
 
 pub use palette::{Palette, Rgb8};
 
@@ -151,7 +152,9 @@ pub struct Modes {
     pub bracketed_paste: bool,
     pub alt_screen: bool,
     pub alternate_scroll: bool,
-    pub mouse_reporting: bool,
+    pub mouse: mouse::MouseModes,
+    /// The program wants focus in/out reports (`CSI I` / `CSI O`).
+    pub focus_reporting: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,8 +334,37 @@ impl Terminal {
             bracketed_paste: mode.contains(TermMode::BRACKETED_PASTE),
             alt_screen: mode.contains(TermMode::ALT_SCREEN),
             alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
-            mouse_reporting: mode.intersects(TermMode::MOUSE_MODE),
+            mouse: mouse::MouseModes {
+                report: mode.intersects(TermMode::MOUSE_MODE),
+                drag: mode.contains(TermMode::MOUSE_DRAG),
+                motion: mode.contains(TermMode::MOUSE_MOTION),
+                sgr: mode.contains(TermMode::SGR_MOUSE),
+            },
+            focus_reporting: mode.contains(TermMode::FOCUS_IN_OUT),
         }
+    }
+
+    /// Reports a focus change to the program, if it asked for it.
+    pub fn report_focus(&self, focused: bool) {
+        if self.modes().focus_reporting {
+            self.write(if focused {
+                &b"\x1b[I"[..]
+            } else {
+                &b"\x1b[O"[..]
+            });
+        }
+    }
+
+    /// Prints text on the terminal screen locally, without involving the shell
+    /// (e.g. a "process exited" notice once the PTY is gone).
+    pub fn print_local(&self, text: &str) {
+        let mut term = self.term.lock();
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut *term, text.as_bytes());
+        drop(term);
+        // Make the UI redraw even though no PTY output arrived.
+        self.proxy.0.wakeup_pending.store(true, Ordering::Release);
+        (self.proxy.0.notify)(TerminalEvent::Wakeup);
     }
 
     /// Scrolls the viewport through history. Positive = up (older lines).

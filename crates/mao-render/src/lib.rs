@@ -37,9 +37,10 @@ pub enum RenderError {
 pub enum FrameOutcome {
     /// The frame was presented.
     Presented,
-    /// The frame was skipped (window occluded, zero-sized, timeout, reconfigured);
-    /// the caller should simply request another frame when something changes.
+    /// The frame was skipped (window occluded, timeout); draw again when something changes.
     Skipped,
+    /// The surface was reconfigured or recreated; request another frame now.
+    Retry,
 }
 
 /// Options used when creating the [`Renderer`].
@@ -80,6 +81,9 @@ struct Text {
 
 /// Owns the wgpu device, the window surface and all render state.
 pub struct Renderer {
+    instance: wgpu::Instance,
+    /// Recreates the surface target (the window) after a surface loss.
+    surface_target: Box<dyn Fn() -> wgpu::SurfaceTarget<'static>>,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -108,7 +112,7 @@ impl Renderer {
         options: RendererOptions,
     ) -> Result<Self, RenderError>
     where
-        W: Into<wgpu::SurfaceTarget<'static>> + Clone,
+        W: Into<wgpu::SurfaceTarget<'static>> + Clone + 'static,
         D: wgpu::wgt::WgpuHasDisplayHandle + Clone,
     {
         let started = std::time::Instant::now();
@@ -122,7 +126,7 @@ impl Renderer {
         // `WGPU_BACKEND` (applied by `with_env`) overrides both attempts.
         let attempts = preferred_backends();
         let mut attempt = 0;
-        let (surface, adapter) = loop {
+        let (instance, surface, adapter) = loop {
             let backends = attempts[attempt];
             let mut desc =
                 wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display.clone()));
@@ -136,7 +140,7 @@ impl Renderer {
                 ..Default::default()
             });
             match pollster::block_on(request) {
-                Ok(adapter) => break (surface, adapter),
+                Ok(adapter) => break (instance, surface, adapter),
                 Err(e) if attempt + 1 < attempts.len() => {
                     tracing::warn!(
                         ?backends,
@@ -200,6 +204,8 @@ impl Renderer {
         tracing::debug!(ms = t.elapsed().as_millis(), "startup: text pipeline ready");
 
         Ok(Self {
+            instance,
+            surface_target: Box::new(move || window.clone().into()),
             srgb: config.format.is_srgb(),
             surface,
             device,
@@ -278,12 +284,22 @@ impl Renderer {
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.device, &self.config);
-                return Ok(FrameOutcome::Skipped);
+                return Ok(FrameOutcome::Retry);
             }
             wgpu::CurrentSurfaceTexture::Timeout
             | wgpu::CurrentSurfaceTexture::Occluded
             | wgpu::CurrentSurfaceTexture::Validation => return Ok(FrameOutcome::Skipped),
-            wgpu::CurrentSurfaceTexture::Lost => return Err(RenderError::SurfaceLost),
+            wgpu::CurrentSurfaceTexture::Lost => {
+                // Happens e.g. after a driver reset or display change: rebuild the surface.
+                tracing::warn!("GPU surface lost, recreating it");
+                self.surface = self
+                    .instance
+                    .create_surface((self.surface_target)())
+                    .map_err(|_| RenderError::SurfaceLost)?;
+                self.surface.configure(&self.device, &self.config);
+                self.grid.mark_all_dirty();
+                return Ok(FrameOutcome::Retry);
+            }
         };
 
         let (width, height) = self.size();

@@ -27,11 +27,11 @@ Cold start (first launch after build) ~300–500 ms due to driver shader caches.
 - ✅ Keyboard: modifiers, special keys, F1–F12, app cursor mode, AltGr on Windows, injected Unicode. Bracketed paste.
 - ✅ Resize, scrollback (wheel, `Shift+PgUp/PgDn`), alternate scroll in full-screen apps, selection (click/drag, double = word, triple = line, Alt = block), copy/paste (`Ctrl+Shift+C/V`, `Ctrl+C` with selection, right click on Windows), zoom (`Ctrl+=/-/0`).
 - ✅ Measure performance budgets (see below).
-- ⬜ Mouse reporting to applications (SGR 1006).
+- ✅ Mouse reporting to applications (normal + SGR 1006: clicks, drag/motion, wheel; Shift bypasses it for selection) and focus reporting.
 - ⬜ Search in buffer (`Ctrl+Shift+F`), URL detection and OSC 8 hyperlinks.
 - ⬜ Color emoji (renders blank today) and combining characters (dropped today).
-- ⬜ Shell exit: show exit code and offer restart instead of closing the window.
-- ⬜ Recover from GPU surface loss instead of exiting.
+- ✅ Shell exit: shows the exit code; Enter restarts the shell, Esc closes the window.
+- ✅ Recover from GPU surface loss by recreating the surface (implemented; not exercised yet — hard to trigger on demand).
 - ⬜ Verify on Linux (X11 + Wayland).
 
 **M1 measurements** (release, Windows 11, Intel Iris Xe, PowerShell 5.1, 1393×922 window):

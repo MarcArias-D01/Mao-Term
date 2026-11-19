@@ -1,10 +1,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use mao_config::Config;
-use mao_render::{FontLoader, FontSpec, FrameOutcome, RenderError, Renderer, RendererOptions};
+use mao_render::{FontLoader, FontSpec, FrameOutcome, Renderer, RendererOptions};
 use mao_terminal::keys::{self, KeyModes};
+use mao_terminal::mouse::{self as tmouse, MouseAction};
 use mao_terminal::{GridSize, Palette, SelectionKind, SpawnOptions, Terminal, TerminalEvent};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
@@ -26,11 +27,15 @@ pub enum UserEvent {
     Terminal(TerminalEvent),
 }
 
-/// Mouse state for selection.
+/// Mouse state for selection and reporting.
 #[derive(Default)]
 struct Mouse {
     position: PhysicalPosition<f64>,
     selecting: bool,
+    /// Button held while the application receives mouse reports.
+    reported_button: Option<tmouse::MouseButton>,
+    /// Last cell reported to the application (motion is only sent on cell change).
+    last_reported_cell: Option<(usize, usize)>,
     last_click: Option<(Instant, usize, usize)>,
     click_count: u8,
     /// Sub-line wheel/touchpad scroll accumulated in pixels.
@@ -51,7 +56,17 @@ struct Session {
     full_redraw: bool,
     /// The window starts hidden and is shown after the first frame.
     shown: bool,
+    /// The shell exited; waiting for Enter (restart) or Esc (close).
+    exited: bool,
+    proxy: EventLoopProxy<UserEvent>,
     key_buf: Vec<u8>,
+}
+
+/// What the app should do after a key press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyOutcome {
+    Handled,
+    CloseWindow,
 }
 
 pub struct App {
@@ -119,30 +134,8 @@ impl App {
         )?;
         tracing::debug!(ms = t.elapsed().as_millis(), "startup: renderer ready");
 
-        let theme = &self.config.theme;
-        let palette = Palette::new(
-            theme.ansi.map(|c| c.to_array()),
-            theme.foreground.to_array(),
-            theme.background.to_array(),
-            theme.cursor.to_array(),
-            theme.selection.to_array(),
-        );
         let grid = grid_size(&renderer, self.config.terminal.padding * scale);
-        let proxy = self.proxy.clone();
-        let terminal = Terminal::spawn(
-            SpawnOptions {
-                program: self.config.shell.program.clone(),
-                args: self.config.shell.args.clone(),
-                working_directory: None,
-                scrollback: self.config.terminal.scrollback,
-                palette,
-            },
-            grid.0,
-            move |event| {
-                // Fails only if the event loop is gone (shutting down).
-                let _ = proxy.send_event(UserEvent::Terminal(event));
-            },
-        )?;
+        let terminal = spawn_terminal(&self.config, grid.0, &self.proxy)?;
         tracing::debug!(ms = t.elapsed().as_millis(), "startup: shell spawned");
 
         let clipboard = arboard::Clipboard::new()
@@ -167,6 +160,8 @@ impl App {
             scale,
             full_redraw: true,
             shown: false,
+            exited: false,
+            proxy: self.proxy.clone(),
             key_buf: Vec::with_capacity(16),
         };
         session.relayout(self.config.terminal.padding);
@@ -197,10 +192,7 @@ impl App {
                 }
             }
             Ok(FrameOutcome::Skipped) => {}
-            Err(RenderError::SurfaceLost) => {
-                // TODO(M1): recreate the surface instead of exiting.
-                self.fail(event_loop, anyhow!("GPU surface lost"));
-            }
+            Ok(FrameOutcome::Retry) => s.window.request_redraw(),
             Err(e) => self.fail(event_loop, e.into()),
         }
     }
@@ -262,9 +254,12 @@ impl Session {
         }
     }
 
-    fn on_key(&mut self, event: &KeyEvent, config: &Config) {
+    fn on_key(&mut self, event: &KeyEvent, config: &Config) -> KeyOutcome {
         if event.state != ElementState::Pressed {
-            return;
+            return KeyOutcome::Handled;
+        }
+        if self.exited {
+            return self.on_key_after_exit(event, config);
         }
         let mods = input::modifiers(self.modifiers);
         if let Some(shortcut) = input::shortcut(event, mods) {
@@ -296,11 +291,11 @@ impl Session {
                     self.window.request_redraw();
                 }
             }
-            return;
+            return KeyOutcome::Handled;
         }
 
         let Some(key) = input::terminal_key(event) else {
-            return;
+            return KeyOutcome::Handled;
         };
         let modes = KeyModes {
             app_cursor: self.terminal.modes().app_cursor,
@@ -310,9 +305,108 @@ impl Session {
             self.terminal.clear_selection();
             self.terminal.write(self.key_buf.clone());
         }
+        KeyOutcome::Handled
+    }
+
+    /// After the shell exited: Enter restarts it, Esc closes the window.
+    fn on_key_after_exit(&mut self, event: &KeyEvent, config: &Config) -> KeyOutcome {
+        use winit::keyboard::{Key, NamedKey};
+        match event.logical_key {
+            Key::Named(NamedKey::Enter) => {
+                let grid = self.terminal.size();
+                match spawn_terminal(config, grid, &self.proxy) {
+                    Ok(terminal) => {
+                        self.terminal = terminal;
+                        self.exited = false;
+                        self.window.set_title("Mao-Term");
+                        self.full_redraw = true;
+                        self.window.request_redraw();
+                    }
+                    Err(e) => {
+                        tracing::error!("failed to restart the shell: {e:#}");
+                        self.terminal
+                            .print_local(&format!("\r\n\x1b[31mfailed to restart: {e}\x1b[0m\r\n"));
+                    }
+                }
+                KeyOutcome::Handled
+            }
+            Key::Named(NamedKey::Escape) => KeyOutcome::CloseWindow,
+            _ => KeyOutcome::Handled,
+        }
+    }
+
+    fn on_shell_exit(&mut self, code: Option<i32>) {
+        if self.exited {
+            // Both "child exited" and "PTY closed" arrive; report once.
+            return;
+        }
+        self.exited = true;
+        tracing::info!(?code, "shell exited");
+        let code = code.map_or_else(|| "?".to_owned(), |c| c.to_string());
+        self.terminal.scroll_to_bottom();
+        self.terminal.print_local(&format!(
+            "\r\n\x1b[0;2m[process exited with code {code} · Enter: restart · Esc: close]\x1b[0m"
+        ));
+    }
+
+    /// Sends a mouse event to the application if it enabled mouse reporting.
+    /// Shift bypasses reporting so the user can still select text.
+    /// Returns whether the event was consumed.
+    fn report_mouse(
+        &mut self,
+        button: Option<tmouse::MouseButton>,
+        action: MouseAction,
+        padding: f32,
+    ) -> bool {
+        let modes = self.terminal.modes().mouse;
+        if !modes.report || self.modifiers.shift_key() || self.exited {
+            return false;
+        }
+        let (row, col, _) = self.mouse_cell(padding);
+        if action == MouseAction::Motion
+            && (!modes.wants_motion(button.is_some())
+                || self.mouse.last_reported_cell == Some((row, col)))
+        {
+            return true;
+        }
+        self.mouse.last_reported_cell = Some((row, col));
+        let mods = input::modifiers(self.modifiers);
+        if tmouse::encode(button, action, mods, row, col, modes, &mut self.key_buf) {
+            self.terminal.write(self.key_buf.clone());
+        }
+        true
     }
 
     fn on_mouse_button(&mut self, state: ElementState, button: MouseButton, padding: f32) {
+        let reported = match button {
+            MouseButton::Left => Some(tmouse::MouseButton::Left),
+            MouseButton::Middle => Some(tmouse::MouseButton::Middle),
+            MouseButton::Right => Some(tmouse::MouseButton::Right),
+            _ => None,
+        };
+        if let Some(b) = reported {
+            let action = match state {
+                ElementState::Pressed => MouseAction::Press,
+                ElementState::Released => MouseAction::Release,
+            };
+            if action == MouseAction::Release && self.mouse.reported_button == Some(b) {
+                // Always pair a reported press with its release, even if Shift is now held.
+                self.mouse.reported_button = None;
+                let (row, col, _) = self.mouse_cell(padding);
+                let modes = self.terminal.modes().mouse;
+                let mods = input::modifiers(self.modifiers);
+                if tmouse::encode(Some(b), action, mods, row, col, modes, &mut self.key_buf) {
+                    self.terminal.write(self.key_buf.clone());
+                }
+                return;
+            }
+            if self.report_mouse(Some(b), action, padding) {
+                if action == MouseAction::Press {
+                    self.mouse.reported_button = Some(b);
+                }
+                return;
+            }
+        }
         match (button, state) {
             (MouseButton::Left, ElementState::Pressed) => {
                 let (row, col, right) = self.mouse_cell(padding);
@@ -351,7 +445,7 @@ impl Session {
         }
     }
 
-    fn on_wheel(&mut self, delta: MouseScrollDelta) {
+    fn on_wheel(&mut self, delta: MouseScrollDelta, padding: f32) {
         let cell_height = self.renderer.cell_metrics().height;
         let lines = match delta {
             MouseScrollDelta::LineDelta(_, y) => y * WHEEL_LINES,
@@ -367,6 +461,17 @@ impl Session {
             return;
         }
         let modes = self.terminal.modes();
+        if modes.mouse.report && !self.modifiers.shift_key() {
+            let button = if lines > 0 {
+                tmouse::MouseButton::WheelUp
+            } else {
+                tmouse::MouseButton::WheelDown
+            };
+            for _ in 0..lines.unsigned_abs().min(10) {
+                self.report_mouse(Some(button), MouseAction::Press, padding);
+            }
+            return;
+        }
         if modes.alt_screen && modes.alternate_scroll {
             // Full-screen apps (less, vim…): scroll by sending arrow keys.
             let arrow: &[u8] = match (lines > 0, modes.app_cursor) {
@@ -400,7 +505,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         let Some(s) = self.session.as_mut() else {
             return;
         };
@@ -415,10 +520,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let _ = clipboard.set_text(text);
                 }
             }
-            TerminalEvent::Exited(code) => {
-                tracing::info!(?code, "shell exited");
-                event_loop.exit();
-            }
+            TerminalEvent::Exited(code) => s.on_shell_exit(code),
         }
     }
 
@@ -444,25 +546,68 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Focused(focused) => {
                 s.focused = focused;
+                s.terminal.report_focus(focused);
                 s.window.request_redraw();
             }
             WindowEvent::ModifiersChanged(mods) => s.modifiers = mods.state(),
-            WindowEvent::KeyboardInput { event, .. } => s.on_key(&event, &self.config),
+            WindowEvent::KeyboardInput { event, .. } => {
+                if s.on_key(&event, &self.config) == KeyOutcome::CloseWindow {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 s.on_mouse_button(state, button, padding)
             }
             WindowEvent::CursorMoved { position, .. } => {
                 s.mouse.position = position;
+                let held = s.mouse.reported_button;
+                if (held.is_some() || s.terminal.modes().mouse.motion)
+                    && s.report_mouse(held, MouseAction::Motion, padding)
+                {
+                    return;
+                }
                 if s.mouse.selecting {
                     let (row, col, right) = s.mouse_cell(padding);
                     s.terminal.update_selection(row, col, right);
                     s.window.request_redraw();
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => s.on_wheel(delta),
+            WindowEvent::MouseWheel { delta, .. } => s.on_wheel(delta, padding),
             _ => {}
         }
     }
+}
+
+/// Spawns the configured shell, forwarding its events to the UI thread.
+fn spawn_terminal(
+    config: &Config,
+    grid: GridSize,
+    proxy: &EventLoopProxy<UserEvent>,
+) -> anyhow::Result<Terminal> {
+    let theme = &config.theme;
+    let palette = Palette::new(
+        theme.ansi.map(|c| c.to_array()),
+        theme.foreground.to_array(),
+        theme.background.to_array(),
+        theme.cursor.to_array(),
+        theme.selection.to_array(),
+    );
+    let proxy = proxy.clone();
+    let terminal = Terminal::spawn(
+        SpawnOptions {
+            program: config.shell.program.clone(),
+            args: config.shell.args.clone(),
+            working_directory: None,
+            scrollback: config.terminal.scrollback,
+            palette,
+        },
+        grid,
+        move |event| {
+            // Fails only if the event loop is gone (shutting down).
+            let _ = proxy.send_event(UserEvent::Terminal(event));
+        },
+    )?;
+    Ok(terminal)
 }
 
 /// Grid size that fits the surface, and the grid origin in pixels.
