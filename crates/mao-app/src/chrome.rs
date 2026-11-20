@@ -404,7 +404,7 @@ pub fn hit_test(x: f32, y: f32, scene: &Scene<'_>) -> Hit {
                 .rows
                 .iter()
                 .position(|r| r.contains(x, y))
-                .map_or(Hit::Palette, Hit::PaletteRow);
+                .map_or(Hit::Palette, |r| Hit::PaletteRow(p.scroll + r));
         }
     }
     if layout.activity.contains(x, y) {
@@ -1456,7 +1456,11 @@ fn draw_palette(ui: &mut UiFrame, s: &DrawState<'_>, p: &Palette) {
     if p.query.is_empty() {
         ui.texts.push(text(
             KEY_PALETTE,
-            "Type a command…",
+            if p.is_themes() {
+                "Select a theme (↑↓ to preview, Enter to keep, Esc to cancel)"
+            } else {
+                "Type a command…"
+            },
             input_text,
             m.ui_text * 1.05,
             c.dim,
@@ -1473,7 +1477,7 @@ fn draw_palette(ui: &mut UiFrame, s: &DrawState<'_>, p: &Palette) {
         ));
     }
 
-    for (i, (row, action)) in g.rows.iter().zip(&p.matches).enumerate() {
+    for (slot, (row, (i, item))) in g.rows.iter().zip(p.visible()).enumerate() {
         let selected = i == p.selected;
         let hovered = *s.hover == Hit::PaletteRow(i);
         if selected {
@@ -1481,18 +1485,37 @@ fn draw_palette(ui: &mut UiFrame, s: &DrawState<'_>, p: &Palette) {
         } else if hovered {
             ui.rect(row.x, row.y, row.w, row.h, c.hover);
         }
-        let inner = Rect::new(row.x + m.px(10.0), row.y, row.w - m.px(20.0), row.h);
+        let mut inner = Rect::new(row.x + m.px(10.0), row.y, row.w - m.px(20.0), row.h);
+        // Themes: a swatch of the theme's background and normal colors.
+        if let Some(theme) = p.theme(item) {
+            let t = &theme.colors;
+            let sw = m.px(14.0);
+            let n = 8.0;
+            let x0 = inner.right() - n * sw - m.px(6.0);
+            let y0 = row.y + (row.h - sw) / 2.0;
+            ui.rect(
+                x0 - m.px(4.0),
+                y0 - m.px(3.0),
+                n * sw + m.px(8.0),
+                sw + m.px(6.0),
+                t.background.to_array(),
+            );
+            for (k, color) in t.ansi[..8].iter().enumerate() {
+                ui.rect(x0 + k as f32 * sw + 1.0, y0, sw - 2.0, sw, color.to_array());
+            }
+            inner.w = (x0 - inner.x - m.px(12.0)).max(0.0);
+        }
         ui.texts.push(text(
-            KEY_PALETTE_ROW | i as u64,
-            action.name(),
+            KEY_PALETTE_ROW | slot as u64,
+            p.label(item),
             inner,
             m.ui_text,
             c.fg,
             Align::Left,
         ));
         ui.texts.push(text(
-            KEY_PALETTE_SHORTCUT | i as u64,
-            action.shortcut(),
+            KEY_PALETTE_SHORTCUT | slot as u64,
+            p.detail(item),
             inner,
             m.ui_text * 0.9,
             c.dim,

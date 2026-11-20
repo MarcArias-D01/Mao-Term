@@ -4,6 +4,7 @@
 //! See `docs/specs/config-theming.md`.
 
 mod color;
+pub mod themes;
 
 use std::path::{Path, PathBuf};
 
@@ -35,13 +36,64 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Theme name (built in, or a file in `<config dir>/themes/`); a table of
+    /// colors is also accepted (older configs).
+    pub theme: ThemeChoice,
+    /// Colors that override the theme's.
+    pub colors: ColorOverrides,
     pub font: FontConfig,
-    pub theme: ThemeConfig,
     pub window: WindowConfig,
     pub terminal: TerminalConfig,
     pub shell: ShellConfig,
     pub input: InputConfig,
     pub agents: AgentsConfig,
+    /// The resolved colors (theme + overrides), filled in when loading.
+    #[serde(skip)]
+    pub palette: ThemeConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum ThemeChoice {
+    Name(String),
+    Colors(ColorOverrides),
+}
+
+impl Default for ThemeChoice {
+    fn default() -> Self {
+        Self::Name(themes::DEFAULT_THEME.to_owned())
+    }
+}
+
+/// Individual colors to override; unset ones come from the theme.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ColorOverrides {
+    pub background: Option<Rgb>,
+    pub foreground: Option<Rgb>,
+    pub cursor: Option<Rgb>,
+    pub selection: Option<Rgb>,
+    pub ansi: Option<[Rgb; 16]>,
+}
+
+impl ColorOverrides {
+    pub fn apply(&self, t: &mut ThemeConfig) {
+        if let Some(c) = self.background {
+            t.background = c;
+        }
+        if let Some(c) = self.foreground {
+            t.foreground = c;
+        }
+        if let Some(c) = self.cursor {
+            t.cursor = c;
+        }
+        if let Some(c) = self.selection {
+            t.selection = c;
+        }
+        if let Some(a) = self.ansi {
+            t.ansi = a;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -204,7 +256,45 @@ impl Default for WindowConfig {
 impl Config {
     /// Parses a configuration from TOML text.
     pub fn from_toml(text: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(text)
+        let mut config: Self = toml::from_str(text)?;
+        config.resolve_theme();
+        Ok(config)
+    }
+
+    /// Name of the chosen theme (`None` for inline colors).
+    pub fn theme_name(&self) -> Option<&str> {
+        match &self.theme {
+            ThemeChoice::Name(n) => Some(n),
+            ThemeChoice::Colors(_) => None,
+        }
+    }
+
+    /// Computes [`Self::palette`] from the theme and the overrides.
+    pub fn resolve_theme(&mut self) {
+        let mut palette = match &self.theme {
+            ThemeChoice::Name(name) => themes::find(name).map_or_else(
+                || {
+                    tracing::warn!(name, "unknown theme, using {}", themes::DEFAULT_THEME);
+                    ThemeConfig::default()
+                },
+                |t| t.colors,
+            ),
+            ThemeChoice::Colors(c) => {
+                let mut t = ThemeConfig::default();
+                c.apply(&mut t);
+                t
+            }
+        };
+        self.colors.apply(&mut palette);
+        self.palette = palette;
+    }
+
+    /// Switches to `theme` (keeping the `[colors]` overrides).
+    pub fn set_theme(&mut self, theme: &themes::Theme) {
+        self.theme = ThemeChoice::Name(theme.name.clone());
+        let mut palette = theme.colors.clone();
+        self.colors.apply(&mut palette);
+        self.palette = palette;
     }
 
     /// Loads the configuration from `path`. A missing file yields the defaults.
@@ -261,6 +351,12 @@ pub fn data_dir() -> Option<PathBuf> {
 pub const CONFIG_TEMPLATE: &str = r##"# Mao-Term configuration. Every value below is the default; uncomment to change.
 # Saved changes apply the next time Mao-Term starts.
 
+# Color theme: Mao Dark, Tokyo Night, Catppuccin Mocha, Dracula, Nord, Gruvbox Dark,
+# One Dark, Rosé Pine, Solarized Dark, Solarized Light or GitHub Light.
+# Your own: a .toml file in the themes/ folder next to this one (same keys as [colors]).
+# Try them live: command palette (Ctrl+Shift+P) → Select Theme.
+# theme = "Mao Dark"
+
 # [font]
 # family = "JetBrains Mono"   # falls back to Cascadia Mono, Consolas, DejaVu Sans Mono…
 # size = 13.0                 # points
@@ -290,13 +386,11 @@ pub const CONFIG_TEMPLATE: &str = r##"# Mao-Term configuration. Every value belo
 ## cmdline = ["my-agent/cli.js"]      # or a substring of its command line
 ## sessions_dir = "~/.my-agent/sessions"
 
-# [theme]
-# background = "#14161b"
-# foreground = "#d8dee9"
-# cursor = "#8ab4f8"
-# selection = "#2e3a55"
-# ansi = ["#1d2027", "#f2777a", "#99cc99", "#ffcc66", "#6699cc", "#cc99cc", "#66cccc", "#d8dee9",
-#         "#5c6370", "#ff8f8f", "#b5e8a0", "#ffe08a", "#8ab4f8", "#e0b0ff", "#8be9fd", "#ffffff"]
+# Override single colors of the theme. Example:
+## [colors]
+## background = "#101010"
+## cursor = "#ff9900"
+## ansi = [16 colors: black, red, green, yellow, blue, magenta, cyan, white, then bright]
 "##;
 
 /// Returns the config file path, creating it from [`CONFIG_TEMPLATE`] if missing.
@@ -340,8 +434,24 @@ mod tests {
         .unwrap();
         assert_eq!(config.font.size, 16.0);
         assert_eq!(config.font.family, FontConfig::default().family);
-        assert_eq!(config.theme.background, Rgb::new(0, 0, 0));
-        assert_eq!(config.theme.foreground, ThemeConfig::default().foreground);
+        assert_eq!(config.palette.background, Rgb::new(0, 0, 0));
+        assert_eq!(config.palette.foreground, ThemeConfig::default().foreground);
+    }
+
+    #[test]
+    fn themes_by_name_with_overrides() {
+        let config = Config::from_toml(
+            "theme = \"nord\"
+[colors]
+cursor = \"#ff0000\"",
+        )
+        .unwrap();
+        let nord = themes::find("Nord").unwrap().colors;
+        assert_eq!(config.palette.background, nord.background);
+        assert_eq!(config.palette.cursor, Rgb::new(255, 0, 0));
+        // Unknown names fall back to the default theme.
+        let config = Config::from_toml("theme = \"nope\"").unwrap();
+        assert_eq!(config.palette, ThemeConfig::default());
     }
 
     #[test]

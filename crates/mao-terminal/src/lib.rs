@@ -341,6 +341,11 @@ impl Terminal {
         self.size
     }
 
+    /// Changes the colors (theme switch). The next render must be a full one.
+    pub fn set_palette(&mut self, palette: Palette) {
+        self.palette = palette;
+    }
+
     /// Process id of the shell.
     pub fn pid(&self) -> Option<u32> {
         self.pid

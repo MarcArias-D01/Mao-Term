@@ -1,0 +1,7 @@
+name = "Mao Dark"
+background = "#14161b"
+foreground = "#d8dee9"
+cursor = "#8ab4f8"
+selection = "#2e3a55"
+ansi = ["#1d2027", "#f2777a", "#99cc99", "#ffcc66", "#6699cc", "#cc99cc", "#66cccc", "#d8dee9",
+        "#5c6370", "#ff8f8f", "#b5e8a0", "#ffe08a", "#8ab4f8", "#e0b0ff", "#8be9fd", "#ffffff"]

@@ -117,6 +117,9 @@ struct Win {
     images: Vec<mao_render::ImageDraw>,
     /// A shell asked to show this file (`mao open`).
     pending_open: Option<PathBuf>,
+    /// Theme to apply (previewed, or kept when `true`), handled by `App`
+    /// because the config changes.
+    theme_request: Option<(String, bool)>,
     /// System sampler; created when a panel first needs it.
     sampler: Option<mao_sysmon::Sampler>,
     detectors: Arc<Vec<mao_agents::Detector>>,
@@ -218,7 +221,7 @@ impl App {
         let mut win = Win {
             layout: Layout::new((size.width, size.height), &metrics, 1, None),
             metrics,
-            colors: Colors::new(&self.config.theme),
+            colors: Colors::new(&self.config.palette),
             window,
             renderer,
             clipboard,
@@ -240,17 +243,18 @@ impl App {
             shown: background,
             engine: Engine::new(history),
             editor_enabled: self.config.input.editor,
-            overlay_colors: OverlayColors::new(&self.config.theme),
+            overlay_colors: OverlayColors::new(&self.config.palette),
             row_buf: Vec::new(),
             sidebar: Sidebar::default(),
             context: None,
             sidebar_resize: false,
             tree_drag: None,
             docs: None,
-            doc_theme: doc_theme(&self.config.theme),
-            doc_colors: doc_colors(&self.config.theme),
+            doc_theme: doc_theme(&self.config.palette),
+            doc_colors: doc_colors(&self.config.palette),
             images: Vec::new(),
             pending_open: None,
+            theme_request: None,
             sampler: None,
             detectors: Arc::new(detectors(&self.config)),
             panel_hits: crate::panels::PanelHits::default(),
@@ -270,7 +274,7 @@ impl App {
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
-        let background = self.config.theme.background.to_array();
+        let background = self.config.palette.background.to_array();
         let Some(w) = self.win.as_mut() else {
             return;
         };
@@ -862,6 +866,26 @@ impl Win {
                 self.palette = Some(Palette::new());
                 self.window.request_redraw();
             }
+            Action::SelectTheme => {
+                let current = config
+                    .theme_name()
+                    .unwrap_or(mao_config::themes::DEFAULT_THEME);
+                // The canonical name of the current theme (config may say "nord").
+                let current = mao_config::themes::find(current)
+                    .map_or_else(|| current.to_owned(), |t| t.name);
+                self.palette = Some(Palette::themes(mao_config::themes::list(), &current));
+                self.window.request_redraw();
+            }
+            Action::OpenThemesFolder => {
+                if let Some(dir) = mao_config::themes::themes_dir() {
+                    if let Err(e) = std::fs::create_dir_all(&dir) {
+                        tracing::warn!("cannot create {}: {e}", dir.display());
+                    }
+                    if let Err(e) = mao_fs::open_with_default_app(&dir) {
+                        tracing::warn!("cannot open {}: {e}", dir.display());
+                    }
+                }
+            }
             Action::NewTab => {
                 if let Err(e) = self.new_tab(config) {
                     tracing::error!("failed to open a tab: {e:#}");
@@ -1215,12 +1239,22 @@ impl Win {
         };
         tracing::trace!(key = ?event.logical_key, text = ?event.text, "palette key");
         match &event.logical_key {
-            Key::Named(NamedKey::Escape) => self.palette = None,
+            Key::Named(NamedKey::Escape) => {
+                // Cancelling the theme picker restores the theme it started with.
+                if let Some(original) = palette.original_theme() {
+                    self.theme_request = Some((original.to_owned(), false));
+                }
+                self.palette = None;
+            }
             Key::Named(NamedKey::Enter) => {
+                let item = palette.selected_item();
+                let theme = item.and_then(|i| palette.theme(i)).map(|t| t.name.clone());
                 let action = palette.selected_action();
                 self.palette = None;
                 self.window.request_redraw();
-                if let Some(action) = action {
+                if let Some(name) = theme {
+                    self.theme_request = Some((name, true));
+                } else if let Some(action) = action {
                     return self.run(config, action);
                 }
             }
@@ -1235,8 +1269,46 @@ impl Win {
                 }
             }
         }
+        // Live preview of the highlighted theme.
+        if let Some(p) = self.palette.as_ref()
+            && let Some(theme) = p.selected_item().and_then(|i| p.theme(i))
+        {
+            self.theme_request = Some((theme.name.clone(), false));
+        }
         self.window.request_redraw();
         Flow::Continue
+    }
+
+    /// Applies new colors everywhere (config already updated by the caller).
+    fn apply_theme(&mut self, config: &Config) {
+        let theme = &config.palette;
+        self.colors = Colors::new(theme);
+        self.overlay_colors = OverlayColors::new(theme);
+        self.doc_theme = doc_theme(theme);
+        self.doc_colors = doc_colors(theme);
+        let term = term_palette(config);
+        for pane in self.ws.panes.values_mut() {
+            pane.terminal.set_palette(term.clone());
+            pane.full_redraw = true;
+        }
+        // Rendered documents have their colors baked in: load them again.
+        if let Some(service) = self.docs.take() {
+            drop(service);
+            let paths: Vec<PathBuf> = self.ws.docs.values().map(|d| d.path.clone()).collect();
+            let proxy = self.proxy.clone();
+            let max_texture = self.renderer.max_texture_size();
+            let mut service = mao_docs::DocService::new(self.doc_theme, max_texture, move |doc| {
+                let _ = proxy.send_event(UserEvent::Doc(doc));
+            });
+            for path in &paths {
+                service.open(path);
+            }
+            self.docs = Some(service);
+        }
+        for doc in self.ws.docs.values_mut() {
+            doc.dirty = true;
+        }
+        self.window.request_redraw();
     }
 
     /// Replaces an exited pane's shell with a fresh one.
@@ -1510,18 +1582,32 @@ impl Win {
         if self.palette.is_some() {
             match hit {
                 Hit::PaletteRow(i) => {
-                    let action = self
+                    let item = self
                         .palette
                         .as_ref()
                         .and_then(|p| p.matches.get(i).copied());
+                    let theme = self
+                        .palette
+                        .as_ref()
+                        .zip(item)
+                        .and_then(|(p, i)| p.theme(i))
+                        .map(|t| t.name.clone());
                     self.palette = None;
                     self.window.request_redraw();
-                    if let Some(action) = action {
-                        return self.run(config, action);
+                    match (theme, item) {
+                        (Some(name), _) => self.theme_request = Some((name, true)),
+                        (None, Some(crate::palette::Item::Action(action))) => {
+                            return self.run(config, action);
+                        }
+                        _ => {}
                     }
                 }
                 Hit::Palette => {}
                 _ => {
+                    if let Some(original) = self.palette.as_ref().and_then(Palette::original_theme)
+                    {
+                        self.theme_request = Some((original.to_owned(), false));
+                    }
                     self.palette = None;
                     self.window.request_redraw();
                 }
@@ -2065,7 +2151,49 @@ impl ApplicationHandler<UserEvent> for App {
         if flow == Flow::Quit {
             event_loop.exit();
         }
+        self.handle_theme_request();
     }
+}
+
+impl App {
+    /// Applies a theme the window asked for (preview or keep).
+    fn handle_theme_request(&mut self) {
+        let Some(w) = self.win.as_mut() else {
+            return;
+        };
+        let Some((name, keep)) = w.theme_request.take() else {
+            return;
+        };
+        let Some(theme) = mao_config::themes::find(&name) else {
+            tracing::warn!(name, "theme not found");
+            return;
+        };
+        if self.config.palette != theme_with_overrides(&self.config, &theme) {
+            self.config.set_theme(&theme);
+            w.apply_theme(&self.config);
+        } else {
+            self.config.set_theme(&theme);
+        }
+        if keep {
+            match mao_config::config_file_path() {
+                Some(path) => match mao_config::themes::save_choice(&path, &theme.name) {
+                    Ok(()) => tracing::info!(theme = theme.name, "theme saved"),
+                    Err(e) => tracing::error!("cannot save the theme choice: {e}"),
+                },
+                None => tracing::warn!("no config directory; theme not saved"),
+            }
+        }
+    }
+}
+
+/// The colors `theme` would give with the config's overrides.
+fn theme_with_overrides(
+    config: &Config,
+    theme: &mao_config::themes::Theme,
+) -> mao_config::ThemeConfig {
+    let mut colors = theme.colors.clone();
+    config.colors.apply(&mut colors);
+    colors
 }
 
 /// Spawns the configured shell, forwarding its events to the UI thread.
@@ -2077,14 +2205,7 @@ fn spawn_terminal(
     session: u64,
     cwd: Option<PathBuf>,
 ) -> anyhow::Result<Terminal> {
-    let theme = &config.theme;
-    let palette = TermPalette::new(
-        theme.ansi.map(|c| c.to_array()),
-        theme.foreground.to_array(),
-        theme.background.to_array(),
-        theme.cursor.to_array(),
-        theme.selection.to_array(),
-    );
+    let palette = term_palette(config);
     let proxy = proxy.clone();
     let terminal = Terminal::spawn(
         SpawnOptions {
@@ -2132,6 +2253,18 @@ fn detectors(config: &Config) -> Vec<mao_agents::Detector> {
         }
     }
     list
+}
+
+/// Terminal colors from the theme.
+fn term_palette(config: &Config) -> TermPalette {
+    let theme = &config.palette;
+    TermPalette::new(
+        theme.ansi.map(|c| c.to_array()),
+        theme.foreground.to_array(),
+        theme.background.to_array(),
+        theme.cursor.to_array(),
+        theme.selection.to_array(),
+    )
 }
 
 /// Document colors from the terminal theme.

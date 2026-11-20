@@ -35,6 +35,8 @@ pub enum Action {
     ToggleIgnoredFiles,
     CollapseFolders,
     OpenSettings,
+    SelectTheme,
+    OpenThemesFolder,
     /// Document panes.
     ToggleMarkdownSource,
     ToggleWordWrap,
@@ -79,6 +81,8 @@ impl Action {
             Self::ToggleIgnoredFiles => "Toggle Ignored Files in Explorer",
             Self::CollapseFolders => "Collapse Folders in Explorer",
             Self::OpenSettings => "Open Settings File",
+            Self::SelectTheme => "Select Theme…",
+            Self::OpenThemesFolder => "Open Themes Folder",
             Self::ToggleMarkdownSource => "Toggle Markdown Source",
             Self::ToggleWordWrap => "Toggle Word Wrap",
             Self::FindInDocument => "Find in Document",
@@ -127,7 +131,9 @@ impl Action {
             | Self::ToggleIgnoredFiles
             | Self::CollapseFolders
             | Self::ToggleMarkdownSource
-            | Self::OpenDocumentExternally => "",
+            | Self::OpenDocumentExternally
+            | Self::SelectTheme
+            | Self::OpenThemesFolder => "",
         }
     }
 }
@@ -161,6 +167,8 @@ pub const PALETTE: &[Action] = &[
     Action::CollapseFolders,
     Action::ShowPanel(Panel::Agents),
     Action::ShowPanel(Panel::Monitor),
+    Action::SelectTheme,
+    Action::OpenThemesFolder,
     Action::OpenSettings,
     Action::ToggleMarkdownSource,
     Action::ToggleWordWrap,
