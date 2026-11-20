@@ -126,6 +126,10 @@ struct Win {
     images: Vec<mao_render::ImageDraw>,
     /// A shell asked to show this file (`mao open`).
     pending_open: Option<PathBuf>,
+    /// We draw the title bar (window has no OS decorations).
+    custom_frame: bool,
+    /// Last click on the empty title bar (double click = maximize).
+    title_click: Option<Instant>,
     /// Theme to apply (previewed, or kept when `true`), handled by `App`
     /// because the config changes.
     theme_request: Option<(String, bool)>,
@@ -179,12 +183,34 @@ impl App {
     fn create_window(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<Win> {
         let fonts = self.fonts.take().context("window already created")?;
         let background = std::env::var_os("MAO_DEBUG_BACKGROUND").is_some();
-        let attributes = Window::default_attributes()
+        let win_cfg = &self.config.window;
+        let custom_frame = win_cfg.decorations == mao_config::Decorations::Custom;
+        let translucent = win_cfg.opacity < 1.0;
+        let mut attributes = Window::default_attributes()
             .with_title("Mao-Term")
-            .with_inner_size(LogicalSize::new(
-                self.config.window.width,
-                self.config.window.height,
-            ))
+            .with_inner_size(LogicalSize::new(win_cfg.width, win_cfg.height))
+            .with_decorations(!custom_frame)
+            .with_transparent(translucent);
+        #[cfg(windows)]
+        {
+            use winit::platform::windows::{
+                BackdropType, CornerPreference, WindowAttributesExtWindows,
+            };
+            attributes = attributes
+                .with_undecorated_shadow(true)
+                .with_corner_preference(CornerPreference::Round);
+            if translucent {
+                // The swapchain lives on a composition visual (see the renderer).
+                attributes = attributes
+                    .with_no_redirection_bitmap(true)
+                    .with_system_backdrop(match win_cfg.backdrop {
+                        mao_config::Backdrop::Acrylic => BackdropType::TransientWindow,
+                        mao_config::Backdrop::Mica => BackdropType::MainWindow,
+                        mao_config::Backdrop::None => BackdropType::None,
+                    });
+            }
+        }
+        let attributes = attributes
             // Testing aid: open without taking keyboard focus, so automated checks
             // never capture what the user is typing elsewhere. Showing a hidden
             // window later would activate it, so in that mode it starts visible.
@@ -192,6 +218,9 @@ impl App {
             .with_active(!background);
         let t = Instant::now();
         let window = Arc::new(event_loop.create_window(attributes)?);
+        if translucent {
+            crate::platform::extend_backdrop(&window);
+        }
         tracing::debug!(ms = t.elapsed().as_millis(), "startup: window created");
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
@@ -205,7 +234,10 @@ impl App {
                 size: self.config.font.size,
                 scale,
             },
-            RendererOptions::default(),
+            RendererOptions {
+                opacity: self.config.window.opacity,
+                ..RendererOptions::default()
+            },
         )?;
         tracing::debug!(ms = t.elapsed().as_millis(), "startup: renderer ready");
 
@@ -266,6 +298,8 @@ impl App {
             doc_colors: doc_colors(&self.config.palette),
             images: Vec::new(),
             pending_open: None,
+            custom_frame,
+            title_click: None,
             theme_request: None,
             sampler: None,
             detectors: Arc::new(detectors(&self.config)),
@@ -525,7 +559,7 @@ impl Win {
 
     /// Recomputes chrome and pane geometry for every tab and resizes the PTYs.
     fn relayout(&mut self, padding: f32) {
-        self.metrics = Metrics::new(self.scale, padding);
+        self.metrics = self.make_metrics(padding);
         self.layout = Layout::new(
             self.renderer.size(),
             &self.metrics,
@@ -565,6 +599,18 @@ impl Win {
             }
         }
         self.window.request_redraw();
+    }
+
+    /// Metrics, with the custom title bar's needs.
+    fn make_metrics(&self, padding: f32) -> Metrics {
+        let mut m = Metrics::new(self.scale, padding);
+        m.window_buttons = self.custom_frame;
+        m.resize_border = if self.custom_frame && !self.window.is_maximized() {
+            m.px(5.0)
+        } else {
+            0.0
+        };
+        m
     }
 
     /// Height of the bottom input box with one line of text.
@@ -1424,6 +1470,17 @@ impl Win {
     fn update_hover(&mut self) {
         let hit = self.hit();
         let icon = match &hit {
+            Hit::Resize(d) => {
+                use winit::window::ResizeDirection as D;
+                match d {
+                    D::East | D::West => CursorIcon::EwResize,
+                    D::North | D::South => CursorIcon::NsResize,
+                    D::NorthEast | D::SouthWest => CursorIcon::NeswResize,
+                    D::NorthWest | D::SouthEast => CursorIcon::NwseResize,
+                }
+            }
+            Hit::WindowButton(_) => CursorIcon::Default,
+            Hit::TitleBar => CursorIcon::Default,
             Hit::Divider(d) if d.dir == SplitDir::Right => CursorIcon::ColResize,
             Hit::Divider(_) => CursorIcon::RowResize,
             Hit::Pane(_) => CursorIcon::Text,
@@ -1639,6 +1696,30 @@ impl Win {
         }
 
         match (hit, button) {
+            (Hit::Resize(dir), MouseButton::Left) => {
+                if let Err(e) = self.window.drag_resize_window(dir) {
+                    tracing::debug!("resize drag failed: {e}");
+                }
+            }
+            (Hit::WindowButton(b), MouseButton::Left) => match b {
+                chrome::WindowButton::Minimize => self.window.set_minimized(true),
+                chrome::WindowButton::Maximize => {
+                    self.window.set_maximized(!self.window.is_maximized());
+                }
+                chrome::WindowButton::Close => return Flow::Quit,
+            },
+            (Hit::TitleBar, MouseButton::Left) => {
+                let now = Instant::now();
+                let double = self
+                    .title_click
+                    .is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(400));
+                self.title_click = (!double).then_some(now);
+                if double {
+                    self.window.set_maximized(!self.window.is_maximized());
+                } else if let Err(e) = self.window.drag_window() {
+                    tracing::debug!("window drag failed: {e}");
+                }
+            }
             (Hit::Tab(i), MouseButton::Left) => self.activate_tab(i),
             (Hit::Tab(i) | Hit::CloseTab(i), MouseButton::Middle)
             | (Hit::CloseTab(i), MouseButton::Left) => return self.close_tab(config, i),
@@ -2226,6 +2307,7 @@ impl Win {
             &mut self.ui,
             &DrawState {
                 inputs: &self.inputs,
+                maximized: self.custom_frame && self.window.is_maximized(),
                 layout: &self.layout,
                 metrics: &self.metrics,
                 colors: &self.colors,

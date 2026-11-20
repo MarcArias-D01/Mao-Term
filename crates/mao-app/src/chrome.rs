@@ -27,6 +27,10 @@ pub struct Metrics {
     pub activity_bar: f32,
     /// Height of a sidebar tree row.
     pub row: f32,
+    /// We draw the title bar: minimize/maximize/close live in the tab bar.
+    pub window_buttons: bool,
+    /// Width of the invisible resize border (0 when maximized / system frame).
+    pub resize_border: f32,
 }
 
 impl Metrics {
@@ -41,12 +45,22 @@ impl Metrics {
             pad: px(padding),
             activity_bar: px(46.0),
             row: px(24.0),
+            window_buttons: false,
+            resize_border: 0.0,
         }
     }
 
     pub fn px(&self, v: f32) -> f32 {
         (v * self.scale).round()
     }
+}
+
+/// Window buttons of the custom title bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowButton {
+    Minimize,
+    Maximize,
+    Close,
 }
 
 /// Buttons of the activity bar.
@@ -71,6 +85,8 @@ pub struct Layout {
     pub tabs: Vec<Rect>,
     pub closes: Vec<Rect>,
     pub plus: Rect,
+    /// Minimize/maximize/close (custom title bar).
+    pub window_buttons: Vec<(WindowButton, Rect)>,
 }
 
 /// Height of the sidebar header (panel title + folder name).
@@ -126,7 +142,25 @@ impl Layout {
 
         let (tab_bar, content) = rest.split_top(m.tab_bar);
         let plus_w = m.tab_bar;
-        let available = (tab_bar.w - plus_w - m.px(8.0)).max(0.0);
+        let mut window_buttons = Vec::new();
+        let mut buttons_w = 0.0;
+        if m.window_buttons {
+            let w = m.px(46.0);
+            for (i, b) in [
+                WindowButton::Minimize,
+                WindowButton::Maximize,
+                WindowButton::Close,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let x = tab_bar.right() - (3 - i) as f32 * w;
+                window_buttons.push((b, Rect::new(x, tab_bar.y, w, tab_bar.h)));
+            }
+            // Leave some empty bar to grab the window by.
+            buttons_w = 3.0 * w + m.px(48.0);
+        }
+        let available = (tab_bar.w - plus_w - m.px(8.0) - buttons_w).max(0.0);
         let tab_w = if tab_count == 0 {
             0.0
         } else {
@@ -158,6 +192,7 @@ impl Layout {
             tabs,
             closes,
             plus,
+            window_buttons,
         }
     }
 
@@ -360,6 +395,10 @@ pub enum Hit {
     Context,
     /// A button in a document pane's header.
     DocButton(PaneId, DocButton),
+    /// Custom title bar: a window button, the empty bar (drag), a resize edge.
+    WindowButton(WindowButton),
+    TitleBar,
+    Resize(winit::window::ResizeDirection),
     /// A column header of the monitor's process list.
     MonitorSort(SortBy),
     /// A process row in the monitor.
@@ -388,6 +427,33 @@ pub fn hit_test(x: f32, y: f32, scene: &Scene<'_>) -> Hit {
         sidebar,
         panel_hits,
     } = *scene;
+    // Invisible resize border around an undecorated window.
+    let b = m.resize_border;
+    if b > 0.0 {
+        use winit::window::ResizeDirection as D;
+        let (w, h) = (layout.status.right(), layout.status.bottom());
+        let (left, right, top, bottom) = (x < b, x >= w - b, y < b, y >= h - b);
+        let corner = 2.0 * b;
+        let dir = match (
+            left || x < corner && (top || bottom),
+            right || x >= w - corner && (top || bottom),
+            top || y < corner && (left || right),
+            bottom || y >= h - corner && (left || right),
+        ) {
+            (true, _, true, _) => Some(D::NorthWest),
+            (_, true, true, _) => Some(D::NorthEast),
+            (true, _, _, true) => Some(D::SouthWest),
+            (_, true, _, true) => Some(D::SouthEast),
+            (true, ..) => Some(D::West),
+            (_, true, ..) => Some(D::East),
+            (_, _, true, _) => Some(D::North),
+            (.., true) => Some(D::South),
+            _ => None,
+        };
+        if let Some(d) = dir {
+            return Hit::Resize(d);
+        }
+    }
     if let Some(menu) = context {
         let (frame, rows) = menu.geometry(layout, m);
         if frame.contains(x, y) {
@@ -455,8 +521,13 @@ pub fn hit_test(x: f32, y: f32, scene: &Scene<'_>) -> Hit {
                 };
             }
         }
+        if let Some((b, _)) = layout.window_buttons.iter().find(|(_, r)| r.contains(x, y)) {
+            return Hit::WindowButton(*b);
+        }
         return if layout.plus.contains(x, y) {
             Hit::NewTab
+        } else if m.window_buttons {
+            Hit::TitleBar
         } else {
             Hit::None
         };
@@ -568,6 +639,7 @@ const KEY_TREE_ICON: u64 = 15 << 48;
 const KEY_CONTEXT: u64 = 16 << 48;
 const KEY_DRAG: u64 = 17 << 48;
 const KEY_DOC: u64 = 18 << 48;
+const KEY_WINDOW_BUTTON: u64 = 23 << 48;
 pub(crate) const KEY_AGENTS: u64 = 19 << 48;
 pub(crate) const KEY_MONITOR: u64 = 20 << 48;
 const KEY_BADGE: u64 = 21 << 48;
@@ -632,6 +704,8 @@ pub struct InputView {
 
 pub struct DrawState<'a> {
     pub inputs: &'a [InputView],
+    /// The window is maximized (custom title bar shows "restore").
+    pub maximized: bool,
     pub sidebar: &'a Sidebar,
     /// An icon font is available.
     pub icons: bool,
@@ -1055,6 +1129,39 @@ fn draw_tab_bar(ui: &mut UiFrame, s: &DrawState<'_>) {
     if *s.hover == Hit::NewTab {
         let p = l.plus;
         ui.rect(p.x, p.y, p.w, p.h, c.hover);
+    }
+    // Custom title bar buttons.
+    for (i, (b, r)) in l.window_buttons.iter().enumerate() {
+        let hovered = *s.hover == Hit::WindowButton(*b);
+        let close = *b == WindowButton::Close;
+        if hovered {
+            ui.top().rect(
+                r.x,
+                r.y,
+                r.w,
+                r.h,
+                if close { [0xc4, 0x2b, 0x1c] } else { c.hover },
+            );
+        }
+        let glyph = match (b, s.icons, s.maximized) {
+            (WindowButton::Minimize, true, _) => "\u{E921}",
+            (WindowButton::Maximize, true, false) => "\u{E922}",
+            (WindowButton::Maximize, true, true) => "\u{E923}",
+            (WindowButton::Close, true, _) => "\u{E8BB}",
+            (WindowButton::Minimize, false, _) => "–",
+            (WindowButton::Maximize, false, _) => "□",
+            (WindowButton::Close, false, _) => "×",
+        };
+        let color = if hovered && close {
+            [0xff, 0xff, 0xff]
+        } else if s.window_focused {
+            c.fg
+        } else {
+            c.dim
+        };
+        let t = icon(KEY_WINDOW_BUTTON | i as u64, glyph, *r, m.px(10.0), color);
+        // On the top layer so the hover fill (also on top) doesn't hide it.
+        ui.top().texts.push(t);
     }
     ui.texts.push(text(
         KEY_PLUS,

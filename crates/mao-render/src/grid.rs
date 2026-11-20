@@ -480,9 +480,20 @@ impl Grid {
     }
 
     /// Appends all quads (rows + cursor) to `out`.
-    pub(crate) fn collect_quads(&self, font: &Font, srgb: bool, out: &mut Vec<f32>) {
+    /// Appends this grid's quads; backgrounds get `opacity` (translucent windows).
+    pub(crate) fn collect_quads(&self, font: &Font, srgb: bool, opacity: f32, out: &mut Vec<f32>) {
+        let start = out.len();
         for row in &self.rows {
             out.extend_from_slice(&row.quads);
+        }
+        if opacity < 1.0 {
+            for alpha in out[start..]
+                .iter_mut()
+                .skip(7)
+                .step_by(crate::quad::FLOATS_PER_QUAD)
+            {
+                *alpha = opacity;
+            }
         }
         let Some(cursor) = self.cursor else {
             return;

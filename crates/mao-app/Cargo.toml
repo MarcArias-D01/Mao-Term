@@ -29,5 +29,9 @@ tracing-subscriber.workspace = true
 unicode-width = "0.2.3"
 winit.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# Only for DwmExtendFrameIntoClientArea (glass backdrop over the whole window).
+windows-sys = { version = "0.61", features = ["Win32_Graphics_Dwm", "Win32_UI_Controls", "Win32_Foundation"] }
+
 [lints]
 workspace = true

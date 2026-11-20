@@ -254,6 +254,30 @@ pub struct WindowConfig {
     pub width: u32,
     /// Initial inner height in logical pixels.
     pub height: u32,
+    /// `custom`: Mao-Term draws its own title bar (tabs + window buttons);
+    /// `system`: the OS title bar.
+    pub decorations: Decorations,
+    /// Background opacity, 0–1 (below 1 the desktop / backdrop shows through).
+    pub opacity: f32,
+    /// Windows 11 material behind a translucent window.
+    pub backdrop: Backdrop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Decorations {
+    Custom,
+    System,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Backdrop {
+    /// Blurred desktop (Windows 11 "Acrylic").
+    Acrylic,
+    /// Wallpaper tint (Windows 11 "Mica").
+    Mica,
+    None,
 }
 
 impl Default for WindowConfig {
@@ -261,6 +285,14 @@ impl Default for WindowConfig {
         Self {
             width: 1100,
             height: 700,
+            // Glass and our own title bar on Windows; Linux untested yet.
+            decorations: if cfg!(windows) {
+                Decorations::Custom
+            } else {
+                Decorations::System
+            },
+            opacity: if cfg!(windows) { 0.86 } else { 1.0 },
+            backdrop: Backdrop::Acrylic,
         }
     }
 }
@@ -376,6 +408,10 @@ pub const CONFIG_TEMPLATE: &str = r##"# Mao-Term configuration. Every value belo
 # [window]
 # width = 1100
 # height = 700
+# backdrop = "acrylic"        # Windows 11 glass: "acrylic" (blur), "mica" or "none"
+# Defaults below are for Windows (on Linux: decorations = "system", opacity = 1.0):
+## decorations = "custom"     # own title bar ("system" = the OS one)
+## opacity = 0.86             # background opacity, 1.0 = solid
 
 # [terminal]
 # scrollback = 10000

@@ -27,6 +27,7 @@ Everything configurable through a readable text file, with hot reload, and good 
 - Theme file = `name` (optional, defaults to the file name) + the five color keys. Built-in: Mao Dark, Tokyo Night, Catppuccin Mocha, Dracula, Nord, Gruvbox Dark, One Dark, Rosé Pine, Solarized Dark, Solarized Light, GitHub Light (`crates/mao-config/themes/`).
 - Palette → *Select Theme…*: swatches, live preview while moving (terminals, chrome, editor, documents), Enter writes `theme = "…"` into `config.toml` keeping the rest of the file, Esc restores. *Open Themes Folder* creates/opens the folder.
 - UI colors are derived from the theme (accent = cursor color); no separate UI keys yet.
+- Window look (`[window]`): `decorations = "custom"` (Windows default: no OS title bar; tabs double as the title bar with minimize/maximize/close, drag to move, double click to maximize, 5 px invisible resize border, rounded corners and shadow) or `"system"`; `opacity` (Windows default 0.86) and `backdrop = "acrylic" | "mica" | "none"`. Translucency = DX12 swapchain on a DirectComposition visual with premultiplied alpha, `DwmExtendFrameIntoClientArea` so the backdrop covers the window; cell/chrome backgrounds take the opacity, popups stay opaque. Falls back to opaque if the surface has no alpha. Linux: untested (defaults: system frame, opaque).
 - Pending: hot reload of the whole config file, follow OS light/dark, keybindings, shell profiles.
 
 ## Out of scope

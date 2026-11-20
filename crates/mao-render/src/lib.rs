@@ -59,6 +59,10 @@ pub struct RendererOptions {
     pub high_performance: bool,
     /// Wait for vsync (`Fifo`). Disabling it uses `Mailbox` when available.
     pub vsync: bool,
+    /// Background opacity (0–1). Below 1 the surface is created with alpha
+    /// (on Windows through DirectComposition) so the desktop / a system
+    /// backdrop shows through; falls back to opaque if unsupported.
+    pub opacity: f32,
 }
 
 impl Default for RendererOptions {
@@ -66,6 +70,7 @@ impl Default for RendererOptions {
         Self {
             high_performance: false,
             vsync: true,
+            opacity: 1.0,
         }
     }
 }
@@ -104,6 +109,8 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     srgb: bool,
+    /// Effective background opacity (1 if the surface has no alpha).
+    opacity: f32,
     quads: QuadPipeline,
     images: ImagePipeline,
     text: Text,
@@ -147,6 +154,11 @@ impl Renderer {
             let mut desc =
                 wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display.clone()));
             desc.backends = backends;
+            if options.opacity < 1.0 {
+                // A swapchain on a composition visual can be transparent.
+                desc.backend_options.dx12.presentation_system =
+                    wgpu::wgt::Dx12SwapchainKind::DxgiFromVisual;
+            }
             let instance = wgpu::Instance::new(desc.with_env());
             let surface = instance.create_surface(window.clone())?;
             let request = instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -194,9 +206,28 @@ impl Renderer {
             } else {
                 wgpu::PresentMode::Fifo
             };
+        let mut opacity = 1.0;
+        if options.opacity < 1.0 {
+            let alpha = [
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                wgpu::CompositeAlphaMode::PostMultiplied,
+            ]
+            .into_iter()
+            .find(|m| caps.alpha_modes.contains(m));
+            match alpha {
+                Some(mode) => {
+                    config.alpha_mode = mode;
+                    opacity = options.opacity.clamp(0.0, 1.0);
+                }
+                None => tracing::info!(
+                    modes = ?caps.alpha_modes,
+                    "surface has no alpha: translucency disabled"
+                ),
+            }
+        }
         // Keep latency low: at most one frame queued ahead.
         config.desired_maximum_frame_latency = 1;
-        tracing::debug!(format = ?config.format, present_mode = ?config.present_mode, "surface configured");
+        tracing::debug!(format = ?config.format, present_mode = ?config.present_mode, alpha = ?config.alpha_mode, opacity, "surface configured");
         surface.configure(&device, &config);
         tracing::debug!(
             ms = started.elapsed().as_millis(),
@@ -229,6 +260,7 @@ impl Renderer {
             instance,
             surface_target: Box::new(move || window.clone().into()),
             srgb: config.format.is_srgb(),
+            opacity,
             surface,
             device,
             queue,
@@ -264,6 +296,11 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+    }
+
+    /// Background opacity in use (1 = opaque).
+    pub fn opacity(&self) -> f32 {
+        self.opacity
     }
 
     /// Whether an icon font is installed (otherwise use plain-symbol fallbacks).
@@ -403,7 +440,7 @@ impl Renderer {
         for id in visible_grids {
             if let Some(grid) = self.grids.get_mut(id) {
                 grid.update(font_system, &self.font, background, self.srgb);
-                grid.collect_quads(&self.font, self.srgb, &mut self.instances);
+                grid.collect_quads(&self.font, self.srgb, self.opacity, &mut self.instances);
             }
         }
         let grid_quads = (self.instances.len() / quad::FLOATS_PER_QUAD) as u32;
@@ -412,6 +449,7 @@ impl Renderer {
             self.font.family(),
             ui,
             self.srgb,
+            self.opacity,
             &mut self.instances,
         );
         let top_quads = (top_start / quad::FLOATS_PER_QUAD) as u32;
@@ -466,6 +504,9 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let [r, g, b, _] = color::to_target(background, self.srgb);
+        // Premultiplied clear: the backdrop shows through the background.
+        let a = self.opacity;
+        let (r, g, b) = (r * a, g * a, b * a);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -483,7 +524,7 @@ impl Renderer {
                             r: f64::from(r),
                             g: f64::from(g),
                             b: f64::from(b),
-                            a: 1.0,
+                            a: f64::from(a),
                         }),
                         store: wgpu::StoreOp::Store,
                     },

@@ -147,10 +147,14 @@ impl UiLayer {
         mono_family: Option<&str>,
         frame: &UiFrame,
         srgb: bool,
+        opacity: f32,
         quads: &mut Vec<f32>,
     ) -> usize {
+        // The base layer is translucent with the window; popups stay opaque.
         for r in &frame.rects {
-            push_quad(quads, r.x, r.y, r.w, r.h, to_target(r.color, srgb));
+            let mut color = to_target(r.color, srgb);
+            color[3] = opacity;
+            push_quad(quads, r.x, r.y, r.w, r.h, color);
         }
         let top_start = quads.len();
         if let Some(top) = frame.top_ref() {
