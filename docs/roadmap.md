@@ -110,6 +110,7 @@ Next steps for startup: create the GPU device in parallel with window creation a
 
 - ✅ Themes: 11 built-in + user theme files, `theme = "…"` + `[colors]` overrides, live picker with preview (palette → *Select Theme…*).
 - ✅ Warp-style input box at the bottom of each pane (context line with folder, git branch and exit code; output above; live prompt hidden) — [ADR 0005](decisions/0005-bottom-input-box.md). `[input] position = "inline"` keeps the old overlay.
+- ✅ In-app settings screen with live controls, saved to `config.toml` keeping comments.
 - ✅ Glass look on Windows 11 (translucent background + Acrylic/Mica backdrop) and custom title bar (no OS caption; window buttons in the tab bar). Idle CPU still 0%.
 - ✅ Document header: *Preview \| Source* segmented control, *Wrap* toggle, *Default app ↗*, close button.
 - ⬜ Command blocks (group output per command, collapse, copy, jump between commands).

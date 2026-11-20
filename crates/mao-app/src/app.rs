@@ -128,6 +128,13 @@ struct Win {
     pending_open: Option<PathBuf>,
     /// We draw the title bar (window has no OS decorations).
     custom_frame: bool,
+    /// The settings screen, when open, and what it shows.
+    settings: Option<crate::settings::SettingsView>,
+    settings_entries: Vec<crate::settings::Entry>,
+    /// A change the user made (applied by `App`, which owns the config).
+    settings_change: Option<crate::settings::Change>,
+    /// Slider row being dragged.
+    slider_drag: Option<usize>,
     /// Last click on the empty title bar (double click = maximize).
     title_click: Option<Instant>,
     /// Theme to apply (previewed, or kept when `true`), handled by `App`
@@ -300,6 +307,10 @@ impl App {
             images: Vec::new(),
             pending_open: None,
             custom_frame,
+            settings: None,
+            settings_entries: Vec::new(),
+            settings_change: None,
+            slider_drag: None,
             title_click: None,
             theme_request: None,
             sampler: None,
@@ -1087,7 +1098,12 @@ impl Win {
                 self.sidebar.files.collapse_all();
                 self.window.request_redraw();
             }
-            Action::OpenSettings => match mao_config::ensure_config_file() {
+            Action::OpenSettings => {
+                self.settings = Some(crate::settings::SettingsView::default());
+                self.refresh_settings(config);
+                self.window.request_redraw();
+            }
+            Action::OpenSettingsFile => match mao_config::ensure_config_file() {
                 Ok(path) => {
                     if let Err(e) = mao_fs::open_with_default_app(&path) {
                         tracing::warn!("cannot open {}: {e}", path.display());
@@ -1142,6 +1158,10 @@ impl Win {
         }
         if self.palette.is_some() {
             return self.on_palette_key(config, event);
+        }
+        if self.settings.is_some() {
+            self.on_settings_key(event);
+            return Flow::Continue;
         }
         if self.context.is_some() {
             if event.logical_key == Key::Named(NamedKey::Escape) {
@@ -1319,6 +1339,9 @@ impl Win {
             Key::Named(NamedKey::Enter) => {
                 let item = palette.selected_item();
                 let theme = item.and_then(|i| palette.theme(i)).map(|t| t.name.clone());
+                if let Some(font) = item.and_then(|i| palette.font(i)) {
+                    self.settings_change = Some(crate::settings::Change::SetFont(font.to_owned()));
+                }
                 let action = palette.selected_action();
                 self.palette = None;
                 self.window.request_redraw();
@@ -1347,6 +1370,86 @@ impl Win {
         }
         self.window.request_redraw();
         Flow::Continue
+    }
+
+    /// Rebuilds what the settings screen shows from the config.
+    fn refresh_settings(&mut self, config: &Config) {
+        if self.settings.is_some() {
+            let font = self
+                .renderer
+                .font_family()
+                .unwrap_or("monospace")
+                .to_owned();
+            let translucency = self.renderer.translucency_available();
+            self.settings_entries = crate::settings::entries(config, &font, translucency);
+        }
+    }
+
+    fn settings_geometry(&self) -> Option<crate::settings::Geometry> {
+        let view = self.settings.as_ref()?;
+        Some(crate::settings::geometry(
+            self.layout.content,
+            &self.metrics,
+            &self.settings_entries,
+            view,
+        ))
+    }
+
+    /// The settings row `i`, if any.
+    fn settings_row(&self, i: usize) -> Option<crate::settings::Row> {
+        crate::settings::rows(&self.settings_entries)
+            .get(i)
+            .map(|r| (*r).clone())
+    }
+
+    fn on_settings_key(&mut self, event: &KeyEvent) {
+        let n = crate::settings::rows(&self.settings_entries).len();
+        let Some(view) = self.settings.as_mut() else {
+            return;
+        };
+        let selected = view.selected;
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => self.settings = None,
+            Key::Named(NamedKey::ArrowDown) if n > 0 => view.selected = (selected + 1) % n,
+            Key::Named(NamedKey::ArrowUp) if n > 0 => view.selected = (selected + n - 1) % n,
+            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) => {
+                let dir = if event.logical_key == Key::Named(NamedKey::ArrowLeft) {
+                    -1
+                } else {
+                    1
+                };
+                self.settings_change = self.settings_row(selected).and_then(|r| r.adjust(dir));
+            }
+            Key::Named(NamedKey::Enter | NamedKey::Space) => {
+                self.settings_change = self.settings_row(selected).and_then(|r| r.activate());
+            }
+            _ => {}
+        }
+        // Keep the selected row visible.
+        if let (Some(g), Some(view)) = (self.settings_geometry(), self.settings.as_ref())
+            && !g.rows.iter().any(|(i, ..)| *i == view.selected)
+        {
+            let sel = view.selected;
+            let max = (g.content_h - g.list.h).max(0.0);
+            let row_h = self.metrics.px(56.0);
+            if let Some(v) = self.settings.as_mut() {
+                v.scroll = (sel as f32 * row_h * 1.1 - g.list.h / 2.0).clamp(0.0, max);
+            }
+        }
+        self.window.request_redraw();
+    }
+
+    /// A slider drag/click at the pointer's x.
+    fn settings_slide(&mut self, i: usize) {
+        let Some(g) = self.settings_geometry() else {
+            return;
+        };
+        let Some((_, _, control, _)) = g.rows.iter().find(|(r, ..)| *r == i) else {
+            return;
+        };
+        let track = chrome::settings_track(*control, &self.metrics);
+        let frac = (self.cursor.x as f32 - track.x) / track.w;
+        self.settings_change = self.settings_row(i).and_then(|r| r.slide_to(frac));
     }
 
     /// Applies new colors everywhere (config already updated by the caller).
@@ -1421,6 +1524,10 @@ impl Win {
                 context: self.context.as_ref(),
                 sidebar: &self.sidebar,
                 panel_hits: &self.panel_hits,
+                settings: self
+                    .settings
+                    .as_ref()
+                    .map(|v| (v, self.settings_entries.as_slice())),
             },
         )
     }
@@ -1495,7 +1602,11 @@ impl Win {
             | Hit::DocButton(..)
             | Hit::MonitorSort(_)
             | Hit::Process(_)
+            | Hit::SettingsClose
+            | Hit::SettingsSegment(..)
+            | Hit::SettingsControl(_)
             | Hit::SidebarRow(_) => CursorIcon::Pointer,
+            Hit::Settings | Hit::SettingsRow(_) => CursorIcon::Default,
             Hit::None | Hit::Palette | Hit::Sidebar | Hit::Context => CursorIcon::Default,
         };
         if icon != self.cursor_icon {
@@ -1512,6 +1623,10 @@ impl Win {
 
     fn on_cursor_moved(&mut self, config: &Config, pos: PhysicalPosition<f64>) {
         self.cursor = pos;
+        if let Some(i) = self.slider_drag {
+            self.settings_slide(i);
+            return;
+        }
         if self.sidebar_resize {
             let x = pos.x as f32 - self.layout.activity.right();
             self.sidebar.width =
@@ -1570,6 +1685,7 @@ impl Win {
     ) -> Flow {
         let (cell, mods) = (self.cell(), input::modifiers(self.modifiers));
         if state == ElementState::Released {
+            self.slider_drag = None;
             self.drag = None;
             self.sidebar_resize = false;
             if let Some(drag) = self.tree_drag.take() {
@@ -1622,6 +1738,41 @@ impl Win {
         }
 
         let hit = self.hit();
+        if self.settings.is_some() && self.palette.is_none() {
+            match hit {
+                Hit::SettingsClose => self.settings = None,
+                Hit::SettingsSegment(i, k) => {
+                    if let Some(v) = self.settings.as_mut() {
+                        v.selected = i;
+                    }
+                    self.settings_change = self.settings_row(i).and_then(|r| r.choose(k));
+                }
+                Hit::SettingsControl(i) => {
+                    if let Some(v) = self.settings.as_mut() {
+                        v.selected = i;
+                    }
+                    let slider = self.settings_row(i).is_some_and(|r| {
+                        matches!(r.control, crate::settings::Control::Slider { .. })
+                    });
+                    if slider {
+                        self.slider_drag = Some(i);
+                        self.settings_slide(i);
+                    } else {
+                        self.settings_change = self.settings_row(i).and_then(|r| r.activate());
+                    }
+                }
+                Hit::SettingsRow(i) => {
+                    if let Some(v) = self.settings.as_mut() {
+                        v.selected = i;
+                    }
+                }
+                Hit::Settings => {}
+                // A click outside the card closes it.
+                _ => self.settings = None,
+            }
+            self.window.request_redraw();
+            return Flow::Continue;
+        }
         if let Some(menu) = self.context.take() {
             if let Hit::ContextItem(i) = hit
                 && let Some(&action) = menu.items.get(i)
@@ -1899,6 +2050,27 @@ impl Win {
     fn on_wheel(&mut self, delta: winit::event::MouseScrollDelta) {
         let (cell, mods, pos) = (self.cell(), input::modifiers(self.modifiers), self.cursor);
         let hit = self.hit();
+        if self.settings.is_some()
+            && matches!(
+                hit,
+                Hit::Settings
+                    | Hit::SettingsRow(_)
+                    | Hit::SettingsControl(_)
+                    | Hit::SettingsSegment(..)
+            )
+        {
+            let dy = match delta {
+                winit::event::MouseScrollDelta::LineDelta(_, y) => -y * self.metrics.px(40.0),
+                winit::event::MouseScrollDelta::PixelDelta(p) => -p.y as f32,
+            };
+            if let Some(g) = self.settings_geometry()
+                && let Some(v) = self.settings.as_mut()
+            {
+                v.scroll = (v.scroll + dy).clamp(0.0, (g.content_h - g.list.h).max(0.0));
+            }
+            self.window.request_redraw();
+            return;
+        }
         if matches!(
             hit,
             Hit::SidebarRow(_) | Hit::Sidebar | Hit::Process(_) | Hit::MonitorSort(_)
@@ -2307,6 +2479,10 @@ impl Win {
         self.panel_hits = chrome::draw(
             &mut self.ui,
             &DrawState {
+                settings: self
+                    .settings
+                    .as_ref()
+                    .map(|v| (v, self.settings_entries.as_slice())),
                 inputs: &self.inputs,
                 maximized: self.custom_frame && self.window.is_maximized(),
                 layout: &self.layout,
@@ -2453,6 +2629,7 @@ impl ApplicationHandler<UserEvent> for App {
             event_loop.exit();
         }
         self.handle_theme_request();
+        self.handle_settings_change();
     }
 }
 
@@ -2484,6 +2661,106 @@ impl App {
                 None => tracing::warn!("no config directory; theme not saved"),
             }
         }
+    }
+}
+
+impl App {
+    /// Applies a change made on the settings screen and saves it.
+    fn handle_settings_change(&mut self) {
+        use crate::settings::Change;
+        use mao_config::edit::{self, Value};
+        let Some(w) = self.win.as_mut() else {
+            return;
+        };
+        let Some(change) = w.settings_change.take() else {
+            return;
+        };
+        let config = &mut self.config;
+        let save = |section: &str, key: &str, v: Value| {
+            if let Some(path) = mao_config::config_file_path()
+                && let Err(e) = edit::set(&path, section, key, v)
+            {
+                tracing::error!("cannot save the setting {section}.{key}: {e}");
+            }
+        };
+        match change {
+            Change::PickTheme => {
+                w.run(config, Action::SelectTheme);
+            }
+            Change::PickFont => {
+                let current = w.renderer.font_family().unwrap_or("").to_owned();
+                w.palette = Some(Palette::fonts(w.renderer.monospace_families(), &current));
+            }
+            Change::SetFont(family) => {
+                w.renderer.set_font_family(&family);
+                config.font.family = family.clone();
+                w.relayout(config.terminal.padding);
+                save("font", "family", Value::Str(family));
+            }
+            Change::FontSize(v) => {
+                config.font.size = v;
+                w.set_font_size(config, v);
+                save("font", "size", Value::Float(f64::from(v)));
+            }
+            Change::Opacity(v) => {
+                config.window.opacity = v;
+                w.renderer.set_opacity(v);
+                save("window", "opacity", Value::Float(f64::from(v)));
+            }
+            Change::Backdrop(b) => {
+                config.window.backdrop = b;
+                crate::platform::set_backdrop(&w.window, b);
+                let name = match b {
+                    mao_config::Backdrop::Acrylic => "acrylic",
+                    mao_config::Backdrop::Mica => "mica",
+                    mao_config::Backdrop::None => "none",
+                };
+                save("window", "backdrop", Value::Str(name.into()));
+            }
+            Change::TitleBar(d) => {
+                config.window.decorations = d;
+                w.custom_frame = d == mao_config::Decorations::Custom;
+                w.window.set_decorations(!w.custom_frame);
+                w.relayout(config.terminal.padding);
+                let name = if w.custom_frame { "custom" } else { "system" };
+                save("window", "decorations", Value::Str(name.into()));
+            }
+            Change::InputPosition(p) => {
+                config.input.position = p;
+                w.input_bottom = config.input.editor && p == mao_config::InputPosition::Bottom;
+                w.relayout(config.terminal.padding);
+                let name = if p == mao_config::InputPosition::Bottom {
+                    "bottom"
+                } else {
+                    "inline"
+                };
+                save("input", "position", Value::Str(name.into()));
+            }
+            Change::Editor(on) => {
+                config.input.editor = on;
+                w.editor_enabled = on;
+                w.input_bottom = on && config.input.position == mao_config::InputPosition::Bottom;
+                w.relayout(config.terminal.padding);
+                save("input", "editor", Value::Bool(on));
+            }
+            Change::Suggestions(on) => {
+                config.input.suggestions = on;
+                save("input", "suggestions", Value::Bool(on));
+            }
+            Change::Padding(v) => {
+                config.terminal.padding = v;
+                w.relayout(v);
+                save("terminal", "padding", Value::Float(f64::from(v)));
+            }
+            Change::OpenConfigFile => {
+                w.run(config, Action::OpenSettingsFile);
+            }
+            Change::OpenThemesFolder => {
+                w.run(config, Action::OpenThemesFolder);
+            }
+        }
+        w.refresh_settings(config);
+        w.window.request_redraw();
     }
 }
 

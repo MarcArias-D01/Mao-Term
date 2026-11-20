@@ -12,6 +12,8 @@ pub enum Item {
     Action(Action),
     /// Index into the theme list.
     Theme(usize),
+    /// Index into the font list.
+    Font(usize),
 }
 
 #[derive(Debug, Default)]
@@ -22,6 +24,10 @@ pub enum Mode {
         themes: Vec<Theme>,
         /// Theme active when the picker opened (restored on Esc).
         original: String,
+    },
+    Fonts {
+        families: Vec<String>,
+        current: String,
     },
 }
 
@@ -62,8 +68,36 @@ impl Palette {
         p
     }
 
-    pub fn is_themes(&self) -> bool {
-        matches!(self.mode, Mode::Themes { .. })
+    /// Font picker, with the current family selected.
+    pub fn fonts(families: Vec<String>, current: &str) -> Self {
+        let mut p = Self {
+            mode: Mode::Fonts {
+                families,
+                current: current.to_owned(),
+            },
+            ..Self::default()
+        };
+        p.refilter();
+        if let Some(i) = p.matches.iter().position(|m| p.label(*m) == current) {
+            p.select(i);
+        }
+        p
+    }
+
+    /// The font family of a font item.
+    pub fn font(&self, item: Item) -> Option<&str> {
+        match (&self.mode, item) {
+            (Mode::Fonts { families, .. }, Item::Font(i)) => families.get(i).map(String::as_str),
+            _ => None,
+        }
+    }
+
+    pub fn placeholder(&self) -> &'static str {
+        match self.mode {
+            Mode::Commands => "Type a command…",
+            Mode::Themes { .. } => "Select a theme (↑↓ to preview, Enter to keep, Esc to cancel)",
+            Mode::Fonts { .. } => "Select a monospace font (Enter to apply)",
+        }
     }
 
     pub fn theme(&self, item: Item) -> Option<&Theme> {
@@ -76,7 +110,7 @@ impl Palette {
     pub fn original_theme(&self) -> Option<&str> {
         match &self.mode {
             Mode::Themes { original, .. } => Some(original),
-            Mode::Commands => None,
+            Mode::Commands | Mode::Fonts { .. } => None,
         }
     }
 
@@ -84,6 +118,7 @@ impl Palette {
         match item {
             Item::Action(a) => a.name(),
             Item::Theme(_) => self.theme(item).map_or("", |t| t.name.as_str()),
+            Item::Font(_) => self.font(item).unwrap_or(""),
         }
     }
 
@@ -93,6 +128,12 @@ impl Palette {
             Item::Action(a) => a.shortcut(),
             Item::Theme(_) => match self.theme(item) {
                 Some(t) if t.path.is_some() => "custom",
+                _ => "",
+            },
+            Item::Font(_) => match &self.mode {
+                Mode::Fonts { current, .. } if self.font(item) == Some(current.as_str()) => {
+                    "current"
+                }
                 _ => "",
             },
         }
@@ -142,7 +183,7 @@ impl Palette {
     pub fn selected_action(&self) -> Option<Action> {
         match self.selected_item()? {
             Item::Action(a) => Some(a),
-            Item::Theme(_) => None,
+            Item::Theme(_) | Item::Font(_) => None,
         }
     }
 
@@ -156,6 +197,11 @@ impl Palette {
                 .iter()
                 .enumerate()
                 .map(|(i, t)| (Item::Theme(i), t.name.clone()))
+                .collect(),
+            Mode::Fonts { families, .. } => families
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (Item::Font(i), f.clone()))
                 .collect(),
         };
         let mut scored: Vec<(i32, usize, Item)> = names

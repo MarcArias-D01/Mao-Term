@@ -4,6 +4,7 @@
 //! See `docs/specs/config-theming.md`.
 
 mod color;
+pub mod edit;
 pub mod themes;
 
 use std::path::{Path, PathBuf};
@@ -291,7 +292,7 @@ impl Default for WindowConfig {
             } else {
                 Decorations::System
             },
-            opacity: if cfg!(windows) { 0.86 } else { 1.0 },
+            opacity: if cfg!(windows) { 0.78 } else { 1.0 },
             backdrop: Backdrop::Acrylic,
         }
     }
@@ -381,7 +382,11 @@ impl Config {
 
 /// Directory holding the user configuration:
 /// `%APPDATA%\mao-term\config` on Windows, `$XDG_CONFIG_HOME/mao-term` on Linux.
+/// `MAO_CONFIG_DIR` overrides it (tests, portable setups).
 pub fn config_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("MAO_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
     directories::ProjectDirs::from("", "", "mao-term").map(|d| d.config_dir().to_owned())
 }
 
@@ -411,7 +416,7 @@ pub const CONFIG_TEMPLATE: &str = r##"# Mao-Term configuration. Every value belo
 # backdrop = "acrylic"        # Windows 11 glass: "acrylic" (blur), "mica" or "none"
 # Defaults below are for Windows (on Linux: decorations = "system", opacity = 1.0):
 ## decorations = "custom"     # own title bar ("system" = the OS one)
-## opacity = 0.86             # background opacity, 1.0 = solid
+## opacity = 0.78             # background opacity, 1.0 = solid
 
 # [terminal]
 # scrollback = 10000

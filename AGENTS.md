@@ -62,7 +62,7 @@ Skills live in `docs/skills/<name>/SKILL.md` (frontmatter with `name` + `descrip
 cargo build                          # build
 cargo run -p mao-app                 # run the terminal (binary: mao-term)
 MAO_LOG=debug cargo run -p mao-app   # verbose logs (MAO_LOG_FILE=path to log to a file); WGPU_BACKEND=dx12|vulkan|gl
-# Testing hooks: MAO_DEBUG_INPUT, MAO_DEBUG_ACTIONS, MAO_DEBUG_OPEN, MAO_DEBUG_BACKGROUND (see skill terminal-emulation)
+# Testing hooks: MAO_DEBUG_INPUT, MAO_DEBUG_ACTIONS, MAO_DEBUG_OPEN, MAO_DEBUG_BACKGROUND, MAO_CONFIG_DIR (see skill terminal-emulation)
 cargo test --workspace               # tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all

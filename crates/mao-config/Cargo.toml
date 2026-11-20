@@ -12,6 +12,7 @@ directories.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+toml_edit = "0.25"
 tracing.workspace = true
 
 [lints]

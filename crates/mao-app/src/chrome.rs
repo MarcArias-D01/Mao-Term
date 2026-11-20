@@ -10,6 +10,7 @@ use crate::docpane::{ButtonKind, DocButton, DocPane};
 use crate::editor::{MENU_ROWS, Menu};
 use crate::palette::{MAX_VISIBLE, Palette};
 use crate::panels::{self, PanelHits};
+use crate::settings::{self, Control, Entry, SettingsView};
 use crate::sidebar::{Panel, Sidebar, SortBy};
 use crate::workspace::Workspace;
 
@@ -395,6 +396,12 @@ pub enum Hit {
     Context,
     /// A button in a document pane's header.
     DocButton(PaneId, DocButton),
+    /// Settings screen: close button, a row, a choice segment, a control, the card.
+    SettingsClose,
+    SettingsRow(usize),
+    SettingsSegment(usize, usize),
+    SettingsControl(usize),
+    Settings,
     /// Custom title bar: a window button, the empty bar (drag), a resize edge.
     WindowButton(WindowButton),
     TitleBar,
@@ -415,6 +422,7 @@ pub struct Scene<'a> {
     pub sidebar: &'a Sidebar,
     /// Panel geometry from the last frame.
     pub panel_hits: &'a PanelHits,
+    pub settings: Option<(&'a SettingsView, &'a [Entry])>,
 }
 
 pub fn hit_test(x: f32, y: f32, scene: &Scene<'_>) -> Hit {
@@ -426,6 +434,7 @@ pub fn hit_test(x: f32, y: f32, scene: &Scene<'_>) -> Hit {
         context,
         sidebar,
         panel_hits,
+        settings: settings_view,
     } = *scene;
     // Invisible resize border around an undecorated window.
     let b = m.resize_border;
@@ -461,6 +470,29 @@ pub fn hit_test(x: f32, y: f32, scene: &Scene<'_>) -> Hit {
                 .iter()
                 .position(|r| r.contains(x, y))
                 .map_or(Hit::Context, Hit::ContextItem);
+        }
+    }
+    // The palette (font/theme pickers) sits above the settings card.
+    let palette_hit =
+        palette.is_some_and(|p| PaletteGeometry::new(layout, m, p).frame.contains(x, y));
+    if !palette_hit && let Some((view, entries)) = settings_view {
+        let g = settings::geometry(layout.content, m, entries, view);
+        if g.card.contains(x, y) {
+            if g.close.contains(x, y) {
+                return Hit::SettingsClose;
+            }
+            for (i, row, control, segments) in &g.rows {
+                if let Some(k) = segments.iter().position(|s| s.contains(x, y)) {
+                    return Hit::SettingsSegment(*i, k);
+                }
+                if control.inset(-m.px(4.0)).contains(x, y) {
+                    return Hit::SettingsControl(*i);
+                }
+                if row.contains(x, y) {
+                    return Hit::SettingsRow(*i);
+                }
+            }
+            return Hit::Settings;
         }
     }
     if let Some(p) = palette {
@@ -704,6 +736,7 @@ pub struct InputView {
 
 pub struct DrawState<'a> {
     pub inputs: &'a [InputView],
+    pub settings: Option<(&'a SettingsView, &'a [Entry])>,
     /// The window is maximized (custom title bar shows "restore").
     pub maximized: bool,
     pub sidebar: &'a Sidebar,
@@ -745,6 +778,9 @@ pub fn draw(ui: &mut UiFrame, s: &DrawState<'_>) -> PanelHits {
     }
     if let Some((label, x, y)) = s.drag {
         draw_drag(top, s, label, x, y);
+    }
+    if let Some((view, entries)) = s.settings {
+        draw_settings(top, s, view, entries);
     }
     if let Some(p) = s.palette {
         draw_palette(top, s, p);
@@ -1310,6 +1346,219 @@ fn draw_docs(ui: &mut UiFrame, s: &DrawState<'_>) {
 }
 
 const KEY_INPUT: u64 = 22 << 48;
+const KEY_SETTINGS: u64 = 24 << 48;
+
+/// The settings card (top layer).
+fn draw_settings(ui: &mut UiFrame, s: &DrawState<'_>, view: &SettingsView, entries: &[Entry]) {
+    let (m, c, l) = (s.metrics, s.colors, s.layout);
+    let g = settings::geometry(l.content, m, entries, view);
+    let card = g.card;
+    let b = m.gap;
+    ui.rect(
+        card.x - b,
+        card.y - b,
+        card.w + 2.0 * b,
+        card.h + 2.0 * b,
+        c.divider,
+    );
+    ui.rect(card.x, card.y, card.w, card.h, mix(c.chrome, c.bg, 0.5));
+    let pad = m.px(24.0);
+
+    let mut t = text(
+        KEY_SETTINGS,
+        "Settings",
+        Rect::new(card.x + pad, card.y + m.px(10.0), card.w * 0.5, m.px(30.0)),
+        m.ui_text * 1.45,
+        c.fg,
+        Align::Left,
+    );
+    t.bold = true;
+    ui.texts.push(t);
+    ui.texts.push(text(
+        KEY_SETTINGS | 1,
+        "Changes apply now and are saved to config.toml",
+        Rect::new(card.x + pad, card.y + m.px(38.0), card.w * 0.7, m.px(20.0)),
+        m.ui_text * 0.85,
+        c.dim,
+        Align::Left,
+    ));
+    if *s.hover == Hit::SettingsClose {
+        ui.rect(g.close.x, g.close.y, g.close.w, g.close.h, c.hover);
+    }
+    ui.texts.push(text(
+        KEY_SETTINGS | 2,
+        "×",
+        g.close,
+        m.ui_text * 1.5,
+        c.fg,
+        Align::Center,
+    ));
+    ui.rect(card.x, g.list.y - b, card.w, b, c.divider);
+
+    for (k, (title, r)) in g.headers.iter().enumerate() {
+        let mut t = text(
+            KEY_SETTINGS | 0x100 | k as u64,
+            *title,
+            *r,
+            m.ui_text * 0.8,
+            c.accent,
+            Align::Left,
+        );
+        t.bold = true;
+        ui.texts.push(t);
+    }
+
+    let rows = settings::rows(entries);
+    for (i, rr, control, segments) in &g.rows {
+        let Some(row) = rows.get(*i) else {
+            continue;
+        };
+        let key = KEY_SETTINGS | 0x1000 | (*i as u64) << 6;
+        let selected = view.selected == *i;
+        let hovered = matches!(s.hover, Hit::SettingsRow(h) | Hit::SettingsControl(h) | Hit::SettingsSegment(h, _) if h == i);
+        if selected {
+            ui.rect(rr.x, rr.y, rr.w, rr.h, mix(c.raised, c.accent, 0.12));
+            ui.rect(rr.x, rr.y, m.px(3.0), rr.h, c.accent);
+        } else if hovered {
+            ui.rect(rr.x, rr.y, rr.w, rr.h, c.raised);
+        }
+        let label_w = (control.x - rr.x - pad - m.px(16.0)).max(0.0);
+        ui.texts.push(text(
+            key,
+            row.label,
+            Rect::new(
+                rr.x + pad - m.px(8.0),
+                rr.y + m.px(7.0),
+                label_w,
+                m.px(22.0),
+            ),
+            m.ui_text,
+            c.fg,
+            Align::Left,
+        ));
+        ui.texts.push(text(
+            key | 1,
+            row.help.clone(),
+            Rect::new(
+                rr.x + pad - m.px(8.0),
+                rr.y + m.px(28.0),
+                label_w,
+                m.px(20.0),
+            ),
+            m.ui_text * 0.82,
+            c.dim,
+            Align::Left,
+        ));
+        let cr = *control;
+        match &row.control {
+            Control::Choice { options, selected } => {
+                ui.rect(cr.x, cr.y, cr.w, cr.h, c.divider);
+                for (k, (seg, label)) in segments.iter().zip(options.iter()).enumerate() {
+                    let on = k == *selected;
+                    let seg_hover = *s.hover == Hit::SettingsSegment(*i, k);
+                    let fill = if on {
+                        c.accent
+                    } else if seg_hover {
+                        c.hover
+                    } else {
+                        c.raised
+                    };
+                    ui.rect(seg.x + b, seg.y + b, seg.w - 2.0 * b, seg.h - 2.0 * b, fill);
+                    let mut t = text(
+                        key | (8 + k as u64),
+                        *label,
+                        *seg,
+                        m.ui_text * 0.9,
+                        if on { c.bg } else { c.fg },
+                        Align::Center,
+                    );
+                    t.bold = on;
+                    ui.texts.push(t);
+                }
+            }
+            Control::Toggle(on) => {
+                ui.rect(
+                    cr.x,
+                    cr.y,
+                    cr.w,
+                    cr.h,
+                    if *on { c.accent } else { c.divider },
+                );
+                let knob = cr.h - m.px(6.0);
+                let kx = if *on {
+                    cr.right() - knob - m.px(3.0)
+                } else {
+                    cr.x + m.px(3.0)
+                };
+                ui.rect(
+                    kx,
+                    cr.y + m.px(3.0),
+                    knob,
+                    knob,
+                    if *on { c.bg } else { c.fg },
+                );
+            }
+            Control::Slider {
+                min,
+                max,
+                value,
+                label,
+                ..
+            } => {
+                let value_w = m.px(56.0);
+                ui.texts.push(text(
+                    key | 2,
+                    label.clone(),
+                    Rect::new(cr.x, cr.y, value_w, cr.h),
+                    m.ui_text * 0.9,
+                    c.fg,
+                    Align::Left,
+                ));
+                let track = settings_track(cr, m);
+                let frac = ((value - min) / (max - min)).clamp(0.0, 1.0);
+                let ty = track.y + track.h / 2.0 - m.px(2.0);
+                ui.rect(track.x, ty, track.w, m.px(4.0), c.divider);
+                ui.rect(track.x, ty, track.w * frac, m.px(4.0), c.accent);
+                let k = m.px(14.0);
+                ui.rect(
+                    track.x + track.w * frac - k / 2.0,
+                    track.y + (track.h - k) / 2.0,
+                    k,
+                    k,
+                    c.fg,
+                );
+            }
+            Control::Button(label) => {
+                ui.rect(cr.x, cr.y, cr.w, cr.h, c.divider);
+                let fill = if *s.hover == Hit::SettingsControl(*i) {
+                    c.hover
+                } else {
+                    c.raised
+                };
+                ui.rect(cr.x + b, cr.y + b, cr.w - 2.0 * b, cr.h - 2.0 * b, fill);
+                ui.texts.push(text(
+                    key | 3,
+                    format!("{label}  ›"),
+                    cr.inset(m.px(10.0)),
+                    m.ui_text * 0.9,
+                    c.fg,
+                    Align::Left,
+                ));
+            }
+        }
+    }
+}
+
+/// The draggable part of a slider control (right of its value label).
+pub fn settings_track(control: Rect, m: &Metrics) -> Rect {
+    let value_w = m.px(56.0);
+    Rect::new(
+        control.x + value_w + m.px(8.0),
+        control.y,
+        (control.w - value_w - m.px(16.0)).max(1.0),
+        control.h,
+    )
+}
 
 /// Input boxes at the bottom of terminal panes: context line + frame around
 /// the editor grid (the grid itself draws the text).
@@ -1687,11 +1936,7 @@ fn draw_palette(ui: &mut UiFrame, s: &DrawState<'_>, p: &Palette) {
     if p.query.is_empty() {
         ui.texts.push(text(
             KEY_PALETTE,
-            if p.is_themes() {
-                "Select a theme (↑↓ to preview, Enter to keep, Esc to cancel)"
-            } else {
-                "Type a command…"
-            },
+            p.placeholder(),
             input_text,
             m.ui_text * 1.05,
             c.dim,

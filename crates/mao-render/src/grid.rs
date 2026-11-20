@@ -136,6 +136,10 @@ impl Font {
         self.measure(font_system);
     }
 
+    pub(crate) fn scale(&self) -> f32 {
+        self.scale
+    }
+
     pub(crate) fn size_pt(&self) -> f32 {
         self.size_pt
     }

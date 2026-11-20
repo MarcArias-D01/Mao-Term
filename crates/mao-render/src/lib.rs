@@ -326,6 +326,52 @@ impl Renderer {
         self.font.cell
     }
 
+    /// Switches the grid font family (keeping size and scale).
+    pub fn set_font_family(&mut self, family: &str) -> CellMetrics {
+        let (size, scale) = (self.font.size_pt(), self.font.scale());
+        self.font = Font::new(&mut self.text.font_system, family, size, scale);
+        for grid in self.grids.values_mut() {
+            grid.set_font(&self.font);
+        }
+        self.font.cell
+    }
+
+    /// The font family in use (after fallbacks).
+    pub fn font_family(&self) -> Option<&str> {
+        self.font.family()
+    }
+
+    /// Installed monospace font families, sorted.
+    pub fn monospace_families(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .text
+            .font_system
+            .db()
+            .faces()
+            .filter(|f| f.monospaced)
+            .filter_map(|f| f.families.first().map(|(n, _)| n.clone()))
+            .collect();
+        names.sort_by_key(|n| n.to_lowercase());
+        names.dedup();
+        names
+    }
+
+    /// Whether the surface has alpha (opacity can change at runtime).
+    pub fn translucency_available(&self) -> bool {
+        self.config.alpha_mode != wgpu::CompositeAlphaMode::Opaque
+    }
+
+    /// Changes the background opacity. Only possible when the surface was
+    /// created translucent (opacity < 1 at startup); returns whether it applied.
+    pub fn set_opacity(&mut self, opacity: f32) -> bool {
+        if self.config.alpha_mode == wgpu::CompositeAlphaMode::Opaque {
+            return false;
+        }
+        // Applied when quads are collected: no row needs rebuilding.
+        self.opacity = opacity.clamp(0.0, 1.0);
+        true
+    }
+
     /// Places grid `id` (created on first use) at `origin` with the given size in
     /// cells; its text is clipped to `clip` = `[x, y, w, h]` in pixels.
     pub fn set_grid_layout(

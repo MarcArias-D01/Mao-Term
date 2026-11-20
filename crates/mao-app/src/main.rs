@@ -12,6 +12,7 @@ mod palette;
 mod pane;
 mod panels;
 mod platform;
+mod settings;
 mod sidebar;
 mod workspace;
 
