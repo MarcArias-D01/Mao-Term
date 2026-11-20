@@ -11,7 +11,7 @@ use mao_render::{FontLoader, FontSpec, FrameOutcome, GridId, Renderer, RendererO
 use mao_terminal::{
     GridSize, Palette as TermPalette, RenderOptions, SpawnOptions, Terminal, TerminalEvent,
 };
-use mao_ui::{Divider, PaneId, SplitDir};
+use mao_ui::{Divider, PaneId, Rect, SplitDir};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
@@ -22,7 +22,8 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::actions::Action;
 use crate::chrome::{
-    self, Activity, Colors, ContextMenu, DrawState, FileAction, Hit, Layout, MenuView, Metrics,
+    self, Activity, Colors, ContextMenu, DrawState, FileAction, Hit, InputView, Layout, MenuView,
+    Metrics,
 };
 use crate::docpane::{DocButton, DocColors, DocPane};
 use crate::editor::{Ctx, Outcome};
@@ -34,6 +35,10 @@ use crate::sidebar::{Panel, RowAction, Sidebar};
 use crate::workspace::{Closed, Workspace};
 
 const MIN_FONT_SIZE: f32 = 6.0;
+/// Grid ids of the input boxes: the pane id with this bit set.
+const INPUT_GRID: u64 = 1 << 60;
+/// Most rows the input box grows to.
+const MAX_INPUT_ROWS: usize = 8;
 const MAX_FONT_SIZE: f32 = 72.0;
 
 /// Events sent to the UI thread from other threads.
@@ -101,7 +106,11 @@ struct Win {
     shown: bool,
     engine: Engine,
     editor_enabled: bool,
+    /// Editor in a box at the bottom of panes (Warp-style) instead of inline.
+    input_bottom: bool,
     overlay_colors: OverlayColors,
+    /// Input boxes drawn this frame.
+    inputs: Vec<InputView>,
     /// Scratch row for compositing the editor overlay.
     row_buf: Vec<mao_render::GridCell>,
     sidebar: Sidebar,
@@ -243,6 +252,9 @@ impl App {
             shown: background,
             engine: Engine::new(history),
             editor_enabled: self.config.input.editor,
+            input_bottom: self.config.input.editor
+                && self.config.input.position == mao_config::InputPosition::Bottom,
+            inputs: Vec::new(),
             overlay_colors: OverlayColors::new(&self.config.palette),
             row_buf: Vec::new(),
             sidebar: Sidebar::default(),
@@ -523,6 +535,8 @@ impl Win {
         let cell = self.cell();
         let (content, gap, pad) = (self.layout.content, self.metrics.gap, self.metrics.pad);
         let header = chrome::doc_header(&self.metrics);
+        let input_h = self.input_height();
+        let bottom = self.input_bottom;
         for tab in &self.ws.tabs {
             for (id, rect) in tab.layout(content, gap) {
                 if let Some(doc) = self.ws.docs.get_mut(&id) {
@@ -537,18 +551,25 @@ impl Win {
                     );
                 }
                 if let Some(pane) = self.ws.panes.get_mut(&id) {
-                    let grid = pane.layout(rect, pad, cell);
+                    let boxed = pane.wants_box(bottom).then_some(input_h);
+                    let grid = pane.layout(rect, pad, cell, boxed);
+                    let clip_h = pane.input_rect.map_or(rect.h, |r| r.y - rect.y);
                     self.renderer.set_grid_layout(
                         id,
                         pane.origin,
                         usize::from(grid.cols),
                         usize::from(grid.rows),
-                        [rect.x, rect.y, rect.w, rect.h],
+                        [rect.x, rect.y, rect.w, clip_h],
                     );
                 }
             }
         }
         self.window.request_redraw();
+    }
+
+    /// Height of the bottom input box with one line of text.
+    fn input_height(&self) -> f32 {
+        self.metrics.px(30.0) + self.cell().height + self.metrics.px(10.0)
     }
 
     /// Directory new shells start in: the focused pane's.
@@ -798,6 +819,7 @@ impl Win {
 
     fn close_pane(&mut self, config: &Config, id: PaneId) -> Flow {
         self.renderer.remove_grid(id);
+        self.renderer.remove_grid(id | INPUT_GRID);
         if let Some(doc) = self.ws.docs.get(&id) {
             self.renderer.remove_image(id);
             if let Some(service) = self.docs.as_mut() {
@@ -1204,6 +1226,7 @@ impl Win {
         }
         pane.editor = crate::editor::PromptEditor::default();
         pane.shell = ShellState::Running;
+        pane.running = (!line.trim().is_empty()).then(|| line.trim().to_owned());
         pane.terminal.scroll_to_bottom();
         pane.terminal.clear_selection();
         pane.terminal.write(format!("{line}\r").into_bytes());
@@ -1748,6 +1771,21 @@ impl Win {
                 self.sidebar.files.focused = self.sidebar.panel == Panel::Files;
                 self.window.request_redraw();
             }
+            (Hit::Pane(id), _)
+                if self
+                    .ws
+                    .panes
+                    .get(&id)
+                    .and_then(|p| p.input_drawn)
+                    .is_some_and(|r| r.contains(self.cursor.x as f32, self.cursor.y as f32)) =>
+            {
+                self.sidebar.files.focused = false;
+                if self.ws.focused_id() != Some(id) {
+                    self.ws.focus(id);
+                    self.update_title();
+                }
+                self.window.request_redraw();
+            }
             (Hit::Pane(id), _) => {
                 self.sidebar.files.focused = false;
                 if self.ws.focused_id() != Some(id) {
@@ -1895,9 +1933,25 @@ impl Win {
 
     fn draw(&mut self, background: [u8; 3]) -> Result<FrameOutcome, mao_render::RenderError> {
         self.sync_sidebar();
+        // The input box appears/disappears (integration seen, full-screen apps):
+        // that changes the terminal's size.
+        let bottom = self.input_bottom;
+        if self
+            .ws
+            .panes
+            .values()
+            .any(|p| p.wants_box(bottom) != p.input_rect.is_some())
+        {
+            self.relayout(self.metrics.pad / self.scale);
+        }
         self.visible.clear();
+        self.inputs.clear();
         let cell = self.cell();
         let editor_enabled = self.editor_enabled;
+        let input_colors = OverlayColors {
+            bg: self.colors.raised,
+            ..self.overlay_colors
+        };
         if let Some(tab) = self.ws.active_tab() {
             let focused_pane = tab.focused;
             self.images.clear();
@@ -1921,6 +1975,169 @@ impl Win {
                     self.renderer.invalidate_grid(id);
                 }
                 let focused = self.focused && id == focused_pane && self.palette.is_none();
+
+                // Bottom mode: the editor lives in the input box; the live prompt
+                // rows are hidden from the output above.
+                if let Some(base) = pane.input_rect {
+                    let editing = pane.editor_active(editor_enabled);
+                    let (m, pad) = (&self.metrics, self.metrics.pad);
+                    let grid_x = (base.x + pad).round();
+                    let cols = (((base.w - 2.0 * pad) / cell.width).floor().max(4.0)) as usize;
+                    let input_id = id | INPUT_GRID;
+                    let mut hidden: Vec<usize> = Vec::new();
+                    let mut rect = base;
+                    let mut grid_rect = None;
+                    // Rows of output (the rest of the screen is empty).
+                    let mut used = pane.terminal.cursor_position().map_or(0, |(r, _)| r + 1);
+                    if editing {
+                        if let Some((row, _)) = pane.terminal.cursor_position() {
+                            let start = pane.terminal.wrapped_start(row);
+                            hidden = (start..=row).collect();
+                            used = start;
+                        }
+                        let o = overlay::layout(
+                            &pane.editor,
+                            (0, 2),
+                            cols,
+                            MAX_INPUT_ROWS,
+                            &input_colors,
+                        );
+                        let n = o.rows.len().max(1);
+                        let extra = (n - 1) as f32 * cell.height;
+                        rect = Rect::new(
+                            base.x,
+                            (base.y - extra).max(pane.rect.y),
+                            base.w,
+                            base.h + extra,
+                        );
+                        let gy = (rect.y + m.px(30.0)).round();
+                        let g =
+                            Rect::new(grid_x, gy, cols as f32 * cell.width, n as f32 * cell.height);
+                        self.renderer.set_grid_layout(
+                            input_id,
+                            (g.x, g.y),
+                            cols,
+                            n,
+                            [g.x, g.y, g.w, g.h],
+                        );
+                        let blank = mao_render::GridCell {
+                            ch: ' ',
+                            fg: input_colors.fg,
+                            bg: input_colors.bg,
+                            style: mao_render::CellStyle::default(),
+                        };
+                        for r in 0..n {
+                            self.row_buf.clear();
+                            self.row_buf.resize(cols, blank);
+                            if r == 0 {
+                                self.row_buf[0] = mao_render::GridCell {
+                                    ch: '❯',
+                                    fg: self.overlay_colors.cursor,
+                                    ..blank
+                                };
+                            }
+                            for (rr, c, cellv) in &o.cells {
+                                if *rr == r
+                                    && let Some(slot) = self.row_buf.get_mut(*c)
+                                {
+                                    *slot = *cellv;
+                                }
+                            }
+                            self.renderer.set_row(input_id, r, self.row_buf.drain(..));
+                        }
+                        self.renderer.set_cursor(
+                            input_id,
+                            Some(mao_render::Cursor {
+                                row: o.caret.0,
+                                col: o.caret.1,
+                                shape: if focused {
+                                    mao_render::CursorShape::Beam
+                                } else {
+                                    mao_render::CursorShape::HollowBlock
+                                },
+                                color: self.overlay_colors.cursor,
+                                wide: false,
+                            }),
+                        );
+                        self.visible.push(input_id);
+                        let (_, mc) = o.menu_anchor;
+                        pane.menu_anchor = Some((
+                            g.x + mc as f32 * cell.width,
+                            self.layout.content.bottom() + 10_000.0,
+                            rect.y,
+                        ));
+                        grid_rect = Some(g);
+                    } else {
+                        pane.menu_anchor = None;
+                    }
+                    // Warp-style: short output sits right above the input box.
+                    let size = pane.terminal.size();
+                    let shift = usize::from(size.rows).saturating_sub(used) as f32 * cell.height;
+                    pane.origin = (pane.base_origin.0, pane.base_origin.1 + shift);
+                    // Keep the output's text out of a grown box.
+                    self.renderer.set_grid_layout(
+                        id,
+                        pane.origin,
+                        usize::from(size.cols),
+                        usize::from(size.rows),
+                        [pane.rect.x, pane.rect.y, pane.rect.w, rect.y - pane.rect.y],
+                    );
+                    pane.input_drawn = Some(rect);
+                    let cwd = pane
+                        .cwd
+                        .as_ref()
+                        .map_or_else(String::new, |p| short_path(p));
+                    let branch = pane.git_branch().map(str::to_owned);
+                    self.inputs.push(InputView {
+                        rect,
+                        grid: grid_rect,
+                        cwd,
+                        branch,
+                        exit: pane.last_exit,
+                        running: pane.running.clone().filter(|_| !editing),
+                        focused,
+                    });
+
+                    let stale = std::mem::replace(&mut pane.overlay_rows, hidden);
+                    pane.terminal.invalidate_rows(
+                        stale.into_iter().chain(pane.overlay_rows.iter().copied()),
+                    );
+                    let renderer = &mut self.renderer;
+                    let row_buf = &mut self.row_buf;
+                    let hidden = &pane.overlay_rows;
+                    let bg = self.overlay_colors.bg;
+                    let info = pane.terminal.render(
+                        RenderOptions {
+                            focused,
+                            force_full: full,
+                            hide_cursor: editing,
+                        },
+                        |row, cells| {
+                            if hidden.contains(&row) {
+                                row_buf.clear();
+                                row_buf.extend(cells.iter().map(|_| mao_render::GridCell {
+                                    ch: ' ',
+                                    fg: bg,
+                                    bg,
+                                    style: mao_render::CellStyle::default(),
+                                }));
+                                renderer.set_row(id, row, row_buf.drain(..));
+                            } else {
+                                renderer.set_row(id, row, cells.iter().map(to_grid_cell));
+                            }
+                        },
+                    );
+                    renderer.set_cursor(
+                        id,
+                        if editing {
+                            None
+                        } else {
+                            info.cursor.map(to_cursor)
+                        },
+                    );
+                    continue;
+                }
+                pane.input_drawn = None;
 
                 // The prompt editor, drawn over the terminal where the prompt ends.
                 let size = pane.terminal.size();
@@ -2008,6 +2225,7 @@ impl Win {
         self.panel_hits = chrome::draw(
             &mut self.ui,
             &DrawState {
+                inputs: &self.inputs,
                 layout: &self.layout,
                 metrics: &self.metrics,
                 colors: &self.colors,
@@ -2231,6 +2449,21 @@ fn spawn_terminal(
         },
     )?;
     Ok(terminal)
+}
+
+/// A folder for display, with the home folder as `~`.
+fn short_path(p: &std::path::Path) -> String {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
+    if let Some(home) = home
+        && let Ok(rest) = p.strip_prefix(&home)
+    {
+        if rest.as_os_str().is_empty() {
+            return "~".to_owned();
+        }
+        let sep = std::path::MAIN_SEPARATOR;
+        return format!("~{sep}{}", rest.display());
+    }
+    p.display().to_string()
 }
 
 /// Built-in agent detectors plus the user's (same name = replaced).

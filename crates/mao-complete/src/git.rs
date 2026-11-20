@@ -23,6 +23,30 @@ fn git_dir(cwd: &Path) -> Option<PathBuf> {
     None
 }
 
+/// The checked-out branch (or a short commit id when detached).
+pub fn current_branch(cwd: &Path) -> Option<String> {
+    for dir in cwd.ancestors() {
+        let candidate = dir.join(".git");
+        let head = if candidate.is_dir() {
+            candidate.join("HEAD")
+        } else if candidate.is_file() {
+            // Worktrees and submodules: `.git` is a file pointing at the git dir.
+            let text = std::fs::read_to_string(&candidate).ok()?;
+            dir.join(text.trim().strip_prefix("gitdir:")?.trim())
+                .join("HEAD")
+        } else {
+            continue;
+        };
+        let text = std::fs::read_to_string(head).ok()?;
+        let text = text.trim();
+        return Some(match text.strip_prefix("ref: refs/heads/") {
+            Some(branch) => branch.to_owned(),
+            None => text.chars().take(7).collect(),
+        });
+    }
+    None
+}
+
 /// Local branches first, then remote ones as `remote/branch`.
 pub fn branches(cwd: &Path) -> Vec<String> {
     let Some(git) = git_dir(cwd) else {
@@ -98,5 +122,10 @@ mod tests {
 
         let b = branches(&sub);
         assert_eq!(b, ["feature/login", "main", "old", "origin/dev"]);
+
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/feature/login\n").unwrap();
+        assert_eq!(current_branch(&sub).as_deref(), Some("feature/login"));
+        std::fs::write(git.join("HEAD"), "0123456789abcdef\n").unwrap();
+        assert_eq!(current_branch(&sub).as_deref(), Some("0123456"));
     }
 }

@@ -499,6 +499,26 @@ impl Terminal {
         (row < usize::from(self.size.rows)).then_some((row, point.column.0))
     }
 
+    /// First viewport row of the logical line that `row` belongs to (rows that
+    /// soft-wrapped into it, e.g. a long prompt).
+    pub fn wrapped_start(&self, row: usize) -> usize {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let offset = grid.display_offset() as i32;
+        let last = Column(usize::from(self.size.cols).saturating_sub(1));
+        let mut start = row;
+        while start > 0 {
+            let line = Line(start as i32 - 1 - offset);
+            if line < Line(-(grid.history_size() as i32))
+                || !grid[line][last].flags.contains(Flags::WRAPLINE)
+            {
+                break;
+            }
+            start -= 1;
+        }
+        start
+    }
+
     /// Visits the rows that changed since the last call (all rows if `force_full`),
     /// with colors fully resolved (selection and block cursor included).
     pub fn render(

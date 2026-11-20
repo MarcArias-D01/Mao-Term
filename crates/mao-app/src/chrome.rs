@@ -617,7 +617,21 @@ pub struct MenuView<'a> {
     pub above: f32,
 }
 
+/// The bottom input box of a terminal pane.
+pub struct InputView {
+    /// The whole box (grown upward for long lines).
+    pub rect: Rect,
+    /// Where the editor grid is drawn (`None` while a command runs).
+    pub grid: Option<Rect>,
+    pub cwd: String,
+    pub branch: Option<String>,
+    pub exit: Option<i32>,
+    pub running: Option<String>,
+    pub focused: bool,
+}
+
 pub struct DrawState<'a> {
+    pub inputs: &'a [InputView],
     pub sidebar: &'a Sidebar,
     /// An icon font is available.
     pub icons: bool,
@@ -644,6 +658,7 @@ pub fn draw(ui: &mut UiFrame, s: &DrawState<'_>) -> PanelHits {
     }
     draw_tab_bar(ui, s);
     draw_docs(ui, s);
+    draw_inputs(ui, s);
     draw_panes_decor(ui, s);
     draw_status(ui, s);
     // Floating things go on the top layer so they cover the text below them.
@@ -1182,6 +1197,115 @@ fn draw_docs(ui: &mut UiFrame, s: &DrawState<'_>) {
                 m.ui_text,
                 c.dim,
                 Align::Center,
+            ));
+        }
+    }
+}
+
+const KEY_INPUT: u64 = 22 << 48;
+
+/// Input boxes at the bottom of terminal panes: context line + frame around
+/// the editor grid (the grid itself draws the text).
+fn draw_inputs(ui: &mut UiFrame, s: &DrawState<'_>) {
+    let (m, c) = (s.metrics, s.colors);
+    for (n, v) in s.inputs.iter().enumerate() {
+        let r = v.rect;
+        let key = KEY_INPUT | (n as u64) << 8;
+        // Background everywhere except over the editor grid (UI rects are drawn
+        // after grid text and would hide it).
+        match v.grid {
+            Some(g) => {
+                ui.rect(r.x, r.y, r.w, g.y - r.y, c.raised);
+                ui.rect(r.x, g.y, g.x - r.x, g.h, c.raised);
+                ui.rect(g.right(), g.y, r.right() - g.right(), g.h, c.raised);
+                ui.rect(r.x, g.bottom(), r.w, r.bottom() - g.bottom(), c.raised);
+            }
+            None => ui.rect(r.x, r.y, r.w, r.h, c.raised),
+        }
+        ui.rect(
+            r.x,
+            r.y,
+            r.w,
+            m.gap,
+            if v.focused {
+                mix(c.accent, c.raised, 0.4)
+            } else {
+                c.divider
+            },
+        );
+
+        // Context line: folder, git branch, last exit code / running command.
+        let pad = m.px(12.0);
+        let line = Rect::new(r.x + pad, r.y + m.px(4.0), r.w - 2.0 * pad, m.px(22.0));
+        let size = m.ui_text * 0.9;
+        let cwd_w = (v.cwd.chars().count() as f32 * size * 0.56 + m.px(6.0)).min(line.w * 0.6);
+        ui.texts.push(text(
+            key,
+            v.cwd.clone(),
+            Rect::new(line.x, line.y, cwd_w, line.h),
+            size,
+            c.dim,
+            Align::Left,
+        ));
+        let mut x = line.x + cwd_w + m.px(10.0);
+        if let Some(b) = &v.branch {
+            let w = (b.chars().count() as f32 + 2.0) * size * 0.58 + m.px(10.0);
+            let chip = Rect::new(x, line.y + m.px(2.0), w, line.h - m.px(4.0));
+            ui.rect(
+                chip.x,
+                chip.y,
+                chip.w,
+                chip.h,
+                mix(c.raised, c.branch, 0.15),
+            );
+            ui.texts.push(text(
+                key | 1,
+                format!("⎇ {b}"),
+                chip,
+                size * 0.95,
+                c.branch,
+                Align::Center,
+            ));
+            x += w + m.px(8.0);
+        }
+        if let Some(code) = v.exit.filter(|c| *c != 0) {
+            let label = format!("✗ {code}");
+            let w = (label.chars().count() as f32) * size * 0.6 + m.px(12.0);
+            let chip = Rect::new(x, line.y + m.px(2.0), w, line.h - m.px(4.0));
+            ui.rect(chip.x, chip.y, chip.w, chip.h, mix(c.raised, c.error, 0.18));
+            ui.texts.push(text(
+                key | 2,
+                label,
+                chip,
+                size * 0.95,
+                c.error,
+                Align::Center,
+            ));
+        }
+        if let Some(cmd) = &v.running {
+            ui.texts.push(text(
+                key | 3,
+                format!("running  {cmd}"),
+                line,
+                size,
+                c.accent,
+                Align::Right,
+            ));
+        }
+        if v.grid.is_none() {
+            let body = Rect::new(
+                r.x + pad,
+                line.bottom(),
+                r.w - 2.0 * pad,
+                r.bottom() - line.bottom(),
+            );
+            ui.texts.push(text(
+                key | 4,
+                "Keys go to the running program",
+                body,
+                size,
+                mix(c.dim, c.raised, 0.3),
+                Align::Left,
             ));
         }
     }

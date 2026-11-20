@@ -22,7 +22,7 @@
 | [document-viewer](specs/document-viewer.md) | M5 | In progress |
 | [agents-panel](specs/agents-panel.md) | M6 | In progress |
 | [system-monitor](specs/system-monitor.md) | M6 | In progress |
-| [config-theming](specs/config-theming.md) | M0–M7 | Draft |
+| [config-theming](specs/config-theming.md) | M0–M7 | In progress |
 
 ## Decisions
 
@@ -32,5 +32,6 @@
 | [0002](decisions/0002-native-input-editor.md) | Native input editor for autocomplete | Accepted |
 | [0003](decisions/0003-portable-agent-docs.md) | AGENTS.md and skills in docs/, portable across agents | Accepted |
 | [0004](decisions/0004-document-viewer.md) | Document viewer: cell grid rendering, syntect, `mao open` over OSC | Accepted |
+| [0005](decisions/0005-bottom-input-box.md) | Warp-style input box at the bottom of the pane | Accepted |
 
 Spec statuses: `Draft` → `Approved` → `In progress` → `Done`.

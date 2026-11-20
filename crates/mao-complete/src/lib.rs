@@ -2,7 +2,7 @@
 //! from command specs, paths, git branches and `PATH` executables.
 //! See `docs/specs/input-autocomplete.md`.
 
-mod git;
+pub mod git;
 pub mod history;
 pub mod paths;
 pub mod spec;

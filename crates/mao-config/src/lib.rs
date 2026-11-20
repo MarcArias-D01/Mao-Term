@@ -202,6 +202,17 @@ pub struct InputConfig {
     pub editor: bool,
     /// Show history suggestions as ghost text while typing.
     pub suggestions: bool,
+    /// Where the editor is: a box at the bottom of the pane (Warp-style, the
+    /// output stays above) or inline at the shell's prompt.
+    pub position: InputPosition,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InputPosition {
+    #[default]
+    Bottom,
+    Inline,
 }
 
 impl Default for InputConfig {
@@ -209,6 +220,7 @@ impl Default for InputConfig {
         Self {
             editor: true,
             suggestions: true,
+            position: InputPosition::Bottom,
         }
     }
 }
@@ -377,6 +389,7 @@ pub const CONFIG_TEMPLATE: &str = r##"# Mao-Term configuration. Every value belo
 # [input]
 # editor = true               # Mao-Term's own line editor at the prompt
 # suggestions = true          # history ghost text
+# position = "bottom"         # "bottom" (input box under the output, like Warp) or "inline"
 
 # Extra AI agents for the agents panel (built-in: Claude Code, opencode, Codex,
 # Gemini CLI, Aider, Cursor Agent, Goose, Amp, Copilot CLI). Example:

@@ -30,6 +30,10 @@ Make typing commands fast: as you type, the terminal suggests how to complete it
   4. Dynamic: git branches, `package.json` scripts, `Cargo.toml` targets, environment variables.
   5. `PATH` executables and shell aliases/functions (sent by the integration).
 
+## Input position (ADR 0005)
+
+- `[input] position = "bottom"` (default): Warp-style box at the bottom of each pane with a context line (folder, git branch, last exit code / running command), output above (bottom-aligned when short), live prompt hidden from the output, completion menu above the box; hidden for full-screen apps. `"inline"`: the editor over the prompt (ADR 0002).
+
 ## Out of scope
 
 - AI suggestions (Future).

@@ -106,9 +106,17 @@ Next steps for startup: create the GPU device in parallel with window creation a
 - ⬜ Sampling cost < 1% of a core (measured ~1.7% total with the monitor open).
 - ⬜ Battery, temperatures, disk I/O, per-interface network, alert thresholds; verify on Linux.
 
+## Pre-M7 polish ✅
+
+- ✅ Themes: 11 built-in + user theme files, `theme = "…"` + `[colors]` overrides, live picker with preview (palette → *Select Theme…*).
+- ✅ Warp-style input box at the bottom of each pane (context line with folder, git branch and exit code; output above; live prompt hidden) — [ADR 0005](decisions/0005-bottom-input-box.md). `[input] position = "inline"` keeps the old overlay.
+- ✅ Document header: *Preview \| Source* segmented control, *Wrap* toggle, *Default app ↗*, close button.
+- ⬜ Command blocks (group output per command, collapse, copy, jump between commands).
+- ⬜ Click in the input box to move the caret; multi-line input.
+
 ## M7 — Polish and distribution ⬜
 
-- ⬜ Bundled themes + settings editor.
+- ⬜ Settings editor (themes already done).
 - ⬜ Packages: MSI/winget (Windows), AppImage/.deb (Linux).
 - ⬜ User documentation.
 

@@ -53,6 +53,8 @@ pub struct Pane {
     /// Pane rectangle in window pixels, and the grid origin inside it.
     pub rect: Rect,
     pub origin: (f32, f32),
+    /// Grid origin from the layout (before bottom alignment shifts it down).
+    pub base_origin: (f32, f32),
     /// Next frame must redraw every row of this pane.
     pub full_redraw: bool,
     pub shell: ShellState,
@@ -65,6 +67,14 @@ pub struct Pane {
     pub overlay_rows: Vec<usize>,
     /// Where the completion menu goes: (x, y below the caret row, y of the caret row top).
     pub menu_anchor: Option<(f32, f32, f32)>,
+    /// Space reserved for the input box at the bottom (bottom input mode).
+    pub input_rect: Option<Rect>,
+    /// The input box as drawn last frame (it grows upward for long lines).
+    pub input_drawn: Option<Rect>,
+    /// The command line running now (submitted from the editor).
+    pub running: Option<String>,
+    /// Git branch of `cwd`, cached: (cwd it was read for, branch).
+    git: Option<(PathBuf, Option<String>)>,
     mouse: PaneMouse,
     buf: Vec<u8>,
 }
@@ -78,6 +88,7 @@ impl Pane {
             exited: false,
             rect: Rect::default(),
             origin: (0.0, 0.0),
+            base_origin: (0.0, 0.0),
             full_redraw: true,
             shell: ShellState::Unknown,
             cwd: None,
@@ -85,6 +96,10 @@ impl Pane {
             editor: PromptEditor::default(),
             overlay_rows: Vec::new(),
             menu_anchor: None,
+            input_rect: None,
+            input_drawn: None,
+            running: None,
+            git: None,
             mouse: PaneMouse::default(),
             buf: Vec::with_capacity(16),
         }
@@ -109,9 +124,16 @@ impl Pane {
     pub fn on_shell_event(&mut self, event: ShellEvent) {
         match event {
             ShellEvent::PromptStart => self.shell = ShellState::Prompt,
-            ShellEvent::PromptEnd => self.shell = ShellState::Input,
+            ShellEvent::PromptEnd => {
+                self.shell = ShellState::Input;
+                self.running = None;
+            }
             ShellEvent::CommandStart => self.shell = ShellState::Running,
-            ShellEvent::CommandEnd(code) => self.last_exit = code,
+            ShellEvent::CommandEnd(code) => {
+                self.last_exit = code;
+                // The command may have switched branches.
+                self.git = None;
+            }
             ShellEvent::Cwd(path) => self.cwd = Some(path),
             // Handled by the app (opens a document pane).
             ShellEvent::Open(_) => {}
@@ -153,11 +175,55 @@ impl Pane {
         if last.is_empty() { title } else { last }
     }
 
-    /// Places the pane and resizes its terminal to fit `rect` minus `pad`.
-    pub fn layout(&mut self, rect: Rect, pad: f32, cell: CellMetrics) -> GridSize {
+    /// Whether the bottom input box is shown (bottom mode, the shell has
+    /// integration, and no full-screen program is running).
+    pub fn wants_box(&self, bottom: bool) -> bool {
+        bottom
+            && self.shell != ShellState::Unknown
+            && !self.exited
+            && !self.terminal.modes().alt_screen
+    }
+
+    /// Git branch of the current folder (read from `.git`, cached per folder).
+    pub fn git_branch(&mut self) -> Option<&str> {
+        let cwd = self.cwd.clone()?;
+        if self.git.as_ref().is_none_or(|(dir, _)| *dir != cwd) {
+            // Network shares can block: skip them.
+            let remote = cwd.to_string_lossy().starts_with(r"\\");
+            let branch = if remote {
+                None
+            } else {
+                mao_complete::git::current_branch(&cwd)
+            };
+            self.git = Some((cwd, branch));
+        }
+        self.git.as_ref().and_then(|(_, b)| b.as_deref())
+    }
+
+    /// Places the pane and resizes its terminal to fit `rect` minus `pad`,
+    /// minus `input_h` pixels at the bottom for the input box.
+    pub fn layout(
+        &mut self,
+        rect: Rect,
+        pad: f32,
+        cell: CellMetrics,
+        input_h: Option<f32>,
+    ) -> GridSize {
         self.rect = rect;
         self.origin = ((rect.x + pad).round(), (rect.y + pad).round());
-        let grid = grid_for(rect, pad, cell);
+        self.base_origin = self.origin;
+        let (grid_rect, input) = match input_h {
+            Some(h) => {
+                let h = h.min(rect.h * 0.6);
+                (
+                    Rect::new(rect.x, rect.y, rect.w, rect.h - h),
+                    Some(Rect::new(rect.x, rect.bottom() - h, rect.w, h)),
+                )
+            }
+            None => (rect, None),
+        };
+        self.input_rect = input;
+        let grid = grid_for(grid_rect, pad, cell);
         if grid != self.terminal.size() {
             self.terminal.resize(grid);
             self.full_redraw = true;
