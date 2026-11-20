@@ -92,10 +92,8 @@ struct Text {
     viewport: Viewport,
     /// Terminal grid text.
     renderer: TextRenderer,
-    /// UI text, drawn after the UI rectangles.
-    ui_renderer: TextRenderer,
-    /// Text of the UI's top layer (menus, popups).
-    top_renderer: TextRenderer,
+    /// UI text, one renderer per layer (drawn after that layer's rectangles).
+    ui_renderers: Vec<TextRenderer>,
     ui: UiLayer,
 }
 
@@ -248,10 +246,11 @@ impl Renderer {
         let viewport = Viewport::new(&device, &cache);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let ui_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let top_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let ui_renderers = (0..ui::MAX_LAYERS)
+            .map(|_| {
+                TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None)
+            })
+            .collect();
         let ui = UiLayer::new(&font_system);
         let font = Font::new(&mut font_system, &font.family, font.size, font.scale);
         tracing::debug!(ms = t.elapsed().as_millis(), "startup: text pipeline ready");
@@ -273,8 +272,7 @@ impl Renderer {
                 atlas,
                 viewport,
                 renderer: text_renderer,
-                ui_renderer,
-                top_renderer,
+                ui_renderers,
                 ui,
             },
             font,
@@ -476,8 +474,7 @@ impl Renderer {
             atlas,
             viewport,
             renderer,
-            ui_renderer,
-            top_renderer,
+            ui_renderers,
             ui: ui_layer,
         } = &mut self.text;
 
@@ -490,7 +487,7 @@ impl Renderer {
             }
         }
         let grid_quads = (self.instances.len() / quad::FLOATS_PER_QUAD) as u32;
-        let top_start = ui_layer.update(
+        let starts = ui_layer.update(
             font_system,
             self.font.family(),
             ui,
@@ -498,8 +495,18 @@ impl Renderer {
             self.opacity,
             &mut self.instances,
         );
-        let top_quads = (top_start / quad::FLOATS_PER_QUAD) as u32;
+        // Quad range of each UI layer.
         let all_quads = (self.instances.len() / quad::FLOATS_PER_QUAD) as u32;
+        let layer_ranges: Vec<std::ops::Range<u32>> = starts
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let end = starts
+                    .get(i + 1)
+                    .map_or(all_quads, |e| (*e / quad::FLOATS_PER_QUAD) as u32);
+                (*s / quad::FLOATS_PER_QUAD) as u32..end
+            })
+            .collect();
         self.quads
             .prepare(&self.device, &self.queue, (width, height), &self.instances);
         self.images
@@ -523,27 +530,23 @@ impl Renderer {
         ) {
             tracing::error!("grid text prepare failed: {e}");
         }
-        if let Err(e) = ui_renderer.prepare(
-            &self.device,
-            &self.queue,
-            font_system,
-            atlas,
-            viewport,
-            ui_layer.text_areas(ui),
-            swash,
-        ) {
-            tracing::error!("UI text prepare failed: {e}");
-        }
-        if let Err(e) = top_renderer.prepare(
-            &self.device,
-            &self.queue,
-            font_system,
-            atlas,
-            viewport,
-            ui_layer.top_text_areas(ui),
-            swash,
-        ) {
-            tracing::error!("UI top text prepare failed: {e}");
+        let layers = ui.layers();
+        for (level, text_renderer) in ui_renderers.iter_mut().enumerate() {
+            let areas = layers
+                .get(level)
+                .into_iter()
+                .flat_map(|layer| ui_layer.text_areas(layer));
+            if let Err(e) = text_renderer.prepare(
+                &self.device,
+                &self.queue,
+                font_system,
+                atlas,
+                viewport,
+                areas,
+                swash,
+            ) {
+                tracing::error!(level, "UI text prepare failed: {e}");
+            }
         }
 
         let view = frame
@@ -582,13 +585,11 @@ impl Renderer {
                 tracing::error!("grid text render failed: {e}");
             }
             self.images.draw(&mut pass, (width, height), images);
-            self.quads.draw(&mut pass, grid_quads..top_quads);
-            if let Err(e) = ui_renderer.render(atlas, viewport, &mut pass) {
-                tracing::error!("UI text render failed: {e}");
-            }
-            self.quads.draw(&mut pass, top_quads..all_quads);
-            if let Err(e) = top_renderer.render(atlas, viewport, &mut pass) {
-                tracing::error!("UI top text render failed: {e}");
+            for (range, text_renderer) in layer_ranges.iter().zip(ui_renderers.iter()) {
+                self.quads.draw(&mut pass, range.clone());
+                if let Err(e) = text_renderer.render(atlas, viewport, &mut pass) {
+                    tracing::error!("UI text render failed: {e}");
+                }
             }
         }
         self.queue.submit(std::iter::once(encoder.finish()));

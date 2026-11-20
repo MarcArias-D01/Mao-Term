@@ -50,14 +50,18 @@ pub struct UiText {
     pub align: Align,
 }
 
+/// Layers rendered at most: base, floating (menus, settings), and a popup
+/// over a floating one (a picker opened from the settings).
+pub const MAX_LAYERS: usize = 3;
+
 /// Everything the UI draws in one frame. Within a layer all rectangles are
 /// drawn before all text; floating things (menus, palette) go in [`Self::top`]
-/// so that they cover the base layer's text.
+/// so that they cover the layer below, text included (up to [`MAX_LAYERS`]).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UiFrame {
     pub rects: Vec<UiRect>,
     pub texts: Vec<UiText>,
-    /// The layer drawn above this one (only one level is rendered).
+    /// The layer drawn above this one.
     top: Option<Box<UiFrame>>,
 }
 
@@ -75,8 +79,16 @@ impl UiFrame {
         self.top.get_or_insert_with(Box::default)
     }
 
-    fn top_ref(&self) -> Option<&UiFrame> {
-        self.top.as_deref()
+    /// This layer and the ones above it, bottom first.
+    pub(crate) fn layers(&self) -> Vec<&UiFrame> {
+        let mut out = vec![self];
+        while out.len() < MAX_LAYERS {
+            match out[out.len() - 1].top.as_deref() {
+                Some(t) => out.push(t),
+                None => break,
+            }
+        }
+        out
     }
 
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Rgb8) {
@@ -139,8 +151,8 @@ impl UiLayer {
         self.icon_family.is_some()
     }
 
-    /// Shapes changed labels and appends the base layer's rectangles to `quads`,
-    /// then the top layer's. Returns the length of `quads` where the top layer starts.
+    /// Shapes changed labels and appends every layer's rectangles to `quads`,
+    /// bottom layer first. Returns where each layer's quads start.
     pub(crate) fn update(
         &mut self,
         font_system: &mut FontSystem,
@@ -149,26 +161,24 @@ impl UiLayer {
         srgb: bool,
         opacity: f32,
         quads: &mut Vec<f32>,
-    ) -> usize {
-        // The base layer is translucent with the window; popups stay opaque.
-        for r in &frame.rects {
-            let mut color = to_target(r.color, srgb);
-            color[3] = opacity;
-            push_quad(quads, r.x, r.y, r.w, r.h, color);
-        }
-        let top_start = quads.len();
-        if let Some(top) = frame.top_ref() {
-            for r in &top.rects {
-                push_quad(quads, r.x, r.y, r.w, r.h, to_target(r.color, srgb));
+    ) -> Vec<usize> {
+        let layers = frame.layers();
+        let mut starts = Vec::with_capacity(layers.len());
+        for (level, layer) in layers.iter().enumerate() {
+            starts.push(quads.len());
+            for r in &layer.rects {
+                let mut color = to_target(r.color, srgb);
+                // The base layer is translucent with the window; popups stay opaque.
+                if level == 0 {
+                    color[3] = opacity;
+                }
+                push_quad(quads, r.x, r.y, r.w, r.h, color);
             }
         }
         for c in self.cache.values_mut() {
             c.used = false;
         }
-        let all_texts = frame
-            .texts
-            .iter()
-            .chain(frame.top_ref().into_iter().flat_map(|t| t.texts.iter()));
+        let all_texts = layers.iter().flat_map(|l| l.texts.iter());
         for t in all_texts {
             let line_height = (t.size * 1.3).ceil();
             let entry = self.cache.entry(t.key).or_insert_with(|| Cached {
@@ -228,18 +238,7 @@ impl UiLayer {
             entry.icon = t.icon;
         }
         self.cache.retain(|_, c| c.used);
-        top_start
-    }
-
-    /// Text areas of the top layer.
-    pub(crate) fn top_text_areas<'a>(
-        &'a self,
-        frame: &'a UiFrame,
-    ) -> impl Iterator<Item = TextArea<'a>> {
-        frame
-            .top_ref()
-            .into_iter()
-            .flat_map(move |top| self.text_areas(top))
+        starts
     }
 
     pub(crate) fn text_areas<'a>(

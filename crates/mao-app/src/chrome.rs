@@ -783,7 +783,9 @@ pub fn draw(ui: &mut UiFrame, s: &DrawState<'_>) -> PanelHits {
         draw_settings(top, s, view, entries);
     }
     if let Some(p) = s.palette {
-        draw_palette(top, s, p);
+        // Above the settings card (its pickers open from there).
+        let layer = if s.settings.is_some() { top.top() } else { top };
+        draw_palette(layer, s, p);
     }
     hits
 }
