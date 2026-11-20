@@ -5,7 +5,7 @@ Status: ⬜ pending · 🟨 in progress · ✅ done
 ## M0 — Foundations ✅
 
 - ✅ Cargo workspace with the crates from `design.md` (empty), `rust-toolchain.toml`, edition 2024.
-- ✅ CI (GitHub Actions): fmt, clippy, test on `windows-latest` and `ubuntu-latest`. `cargo-deny` for licenses. *(Not run yet: no remote.)*
+- ✅ CI (GitHub Actions): fmt, clippy, test on `windows-latest` and `ubuntu-latest`. `cargo-deny` for licenses. Green on both OSes since 2026-11-20 (github.com/MarcArias-D01/Mao-Term).
 - ✅ winit + wgpu window that clears the screen with the theme background color.
 - ✅ Minimal config loading (font, size, colors).
 - ✅ Spike: validate `alacritty_terminal::tty` with ConPTY on Windows (see ADR 0001). Output and input both work (`crates/mao-terminal/tests/spawn.rs`); `portable-pty` not needed.
