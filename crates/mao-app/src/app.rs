@@ -1546,8 +1546,16 @@ impl Win {
             (Hit::DocButton(id, button), MouseButton::Left) => {
                 self.ws.focus(id);
                 self.update_title();
+                let source = self.ws.docs.get(&id).is_some_and(|d| d.source);
                 let action = match button {
-                    DocButton::Source => Action::ToggleMarkdownSource,
+                    DocButton::Close => return self.close_pane(config, id),
+                    // Segmented: only a change of view toggles.
+                    DocButton::Preview | DocButton::Source
+                        if source == (button == DocButton::Source) =>
+                    {
+                        return Flow::Continue;
+                    }
+                    DocButton::Preview | DocButton::Source => Action::ToggleMarkdownSource,
                     DocButton::Wrap => Action::ToggleWordWrap,
                     DocButton::External => Action::OpenDocumentExternally,
                     DocButton::Fit => {

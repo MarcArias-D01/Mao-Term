@@ -24,13 +24,28 @@ pub struct DocColors {
 /// Buttons in a document pane's header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocButton {
-    /// Markdown: rendered ↔ source.
+    /// Markdown: the rendered view (segmented with `Source`).
+    Preview,
+    /// Markdown: the source.
     Source,
     Wrap,
     /// Image: fit to the pane.
     Fit,
     /// Open with the system's default app.
     External,
+    /// Close the document pane.
+    Close,
+}
+
+/// How a header button looks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonKind {
+    /// Part of a segmented choice (selected = filled).
+    Segment,
+    /// On/off switch (shows a check when on).
+    Toggle,
+    /// Plain action.
+    Action,
 }
 
 /// A position in the text: line and byte offset in its content.
@@ -534,30 +549,60 @@ impl DocPane {
         &self,
         px: impl Fn(f32) -> f32,
         text_size: f32,
-    ) -> Vec<(DocButton, Rect, &'static str, bool)> {
-        let mut list: Vec<(DocButton, &'static str, bool)> = Vec::new();
+    ) -> Vec<(DocButton, Rect, &'static str, bool, ButtonKind)> {
+        use ButtonKind::*;
+        let mut list: Vec<(DocButton, &'static str, bool, ButtonKind)> = Vec::new();
         if self.is_markdown() {
-            list.push((DocButton::Source, "Source", self.source));
+            list.push((DocButton::Preview, "Preview", !self.source, Segment));
+            list.push((DocButton::Source, "Source", self.source, Segment));
         }
         if self.text().is_some() {
-            list.push((DocButton::Wrap, "Wrap", self.wrap));
+            list.push((
+                DocButton::Wrap,
+                if self.wrap { "✓ Wrap" } else { "Wrap" },
+                self.wrap,
+                Toggle,
+            ));
         }
         if self.image().is_some() {
-            list.push((DocButton::Fit, "Fit", self.zoom.is_none()));
+            list.push((
+                DocButton::Fit,
+                if self.zoom.is_none() {
+                    "✓ Fit"
+                } else {
+                    "Fit"
+                },
+                self.zoom.is_none(),
+                Toggle,
+            ));
         }
-        list.push((DocButton::External, "Open ↗", false));
-        let gap = px(6.0);
+        list.push((DocButton::External, "Default app ↗", false, Action));
+        list.push((DocButton::Close, "×", false, Action));
         let h = (self.header.h - px(8.0)).max(1.0);
-        let mut right = self.header.right() - px(8.0);
+        let mut right = self.header.right() - px(6.0);
         let mut out = Vec::new();
-        for (b, label, on) in list.into_iter().rev() {
-            let w = (label.chars().count() as f32 * text_size * 0.58 + px(16.0)).round();
+        let mut prev: Option<ButtonKind> = None;
+        for (b, label, on, kind) in list.into_iter().rev() {
+            // Segments touch each other; other buttons are spaced.
+            if let Some(p) = prev {
+                right -= if p == Segment && kind == Segment {
+                    0.0
+                } else {
+                    px(8.0)
+                };
+            }
+            let w = if b == DocButton::Close {
+                h
+            } else {
+                (label.chars().count() as f32 * text_size * 0.58 + px(16.0)).round()
+            };
             let r = Rect::new(right - w, self.header.y + (self.header.h - h) / 2.0, w, h);
-            if r.x < self.header.x + self.header.w * 0.35 {
+            if r.x < self.header.x + self.header.w * 0.3 && b != DocButton::Close {
                 break;
             }
-            out.push((b, r, label, on));
-            right -= w + gap;
+            out.push((b, r, label, on, kind));
+            right -= w;
+            prev = Some(kind);
         }
         out.reverse();
         out

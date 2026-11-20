@@ -6,7 +6,7 @@ use mao_config::ThemeConfig;
 use mao_render::{Align, Rgb8, UiFrame, UiText};
 use mao_ui::{Divider, PaneId, Rect};
 
-use crate::docpane::{DocButton, DocPane};
+use crate::docpane::{ButtonKind, DocButton, DocPane};
 use crate::editor::{MENU_ROWS, Menu};
 use crate::palette::{MAX_VISIBLE, Palette};
 use crate::panels::{self, PanelHits};
@@ -486,7 +486,7 @@ pub fn hit_test(x: f32, y: f32, scene: &Scene<'_>) -> Hit {
     {
         return doc_buttons(doc, m)
             .into_iter()
-            .find(|(_, r, _, _)| r.contains(x, y))
+            .find(|(_, r, ..)| r.contains(x, y))
             .map_or(Hit::Pane(id), |(b, ..)| Hit::DocButton(id, b));
     }
     Hit::Pane(id)
@@ -497,7 +497,10 @@ pub fn doc_header(m: &Metrics) -> f32 {
     m.px(30.0)
 }
 
-fn doc_buttons(doc: &DocPane, m: &Metrics) -> Vec<(DocButton, Rect, &'static str, bool)> {
+fn doc_buttons(
+    doc: &DocPane,
+    m: &Metrics,
+) -> Vec<(DocButton, Rect, &'static str, bool, ButtonKind)> {
     doc.buttons(|v| m.px(v), m.ui_text * 0.92)
 }
 
@@ -1114,21 +1117,55 @@ fn draw_docs(ui: &mut UiFrame, s: &DrawState<'_>) {
             ));
         }
 
-        for (i, (b, r, label, on)) in buttons.iter().enumerate() {
+        for (i, (b, r, label, on, kind)) in buttons.iter().enumerate() {
             let hovered = *s.hover == Hit::DocButton(id, *b);
-            if hovered {
-                ui.rect(r.x, r.y, r.w, r.h, c.hover);
-            } else if *on {
-                ui.rect(r.x, r.y, r.w, r.h, c.bg);
-            }
-            ui.texts.push(text(
+            let color = match kind {
+                ButtonKind::Segment => {
+                    // A framed group; the chosen part is filled with the accent.
+                    ui.rect(r.x, r.y, r.w, r.h, c.divider);
+                    let fill = if *on {
+                        c.accent
+                    } else if hovered {
+                        c.hover
+                    } else {
+                        c.raised
+                    };
+                    ui.rect(
+                        r.x + m.gap,
+                        r.y + m.gap,
+                        r.w - 2.0 * m.gap,
+                        r.h - 2.0 * m.gap,
+                        fill,
+                    );
+                    if *on { c.bg } else { c.fg }
+                }
+                ButtonKind::Toggle => {
+                    if hovered {
+                        ui.rect(r.x, r.y, r.w, r.h, c.hover);
+                    }
+                    if *on { c.accent } else { c.dim }
+                }
+                ButtonKind::Action => {
+                    if hovered {
+                        ui.rect(r.x, r.y, r.w, r.h, c.hover);
+                    }
+                    c.fg
+                }
+            };
+            let mut t = text(
                 key(8 + i as u64),
                 *label,
                 *r,
-                size,
-                if *on { c.accent } else { c.fg },
+                if *b == DocButton::Close {
+                    size * 1.3
+                } else {
+                    size
+                },
+                color,
                 Align::Center,
-            ));
+            );
+            t.bold = *kind == ButtonKind::Segment && *on;
+            ui.texts.push(t);
         }
 
         // Loading / can't show.
