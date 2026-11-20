@@ -18,7 +18,7 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -28,11 +28,20 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --no-fail-fast 2>&1 | tee test.log
+      - name: report test failures
+        if: failure()
+        shell: bash
+        # Failing tests as annotations (readable without downloading the logs).
+        run: |
+          grep -E "^(test .* FAILED|---- .* stdout ----|thread '.*' .*panicked at|  left:|  right:|error(\[E[0-9]+\])?:)" test.log             | head -n 40 | sed 's/^/::error title=test::/' || true
 
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
