@@ -52,6 +52,8 @@ pub enum UserEvent {
     Fs(mao_fs::FsEvent),
     /// A document was loaded (or reloaded after a change on disk).
     Doc(Arc<mao_docs::Document>),
+    /// A system sample (monitor and agents panels).
+    Sys(Arc<mao_sysmon::Snapshot>),
 }
 
 /// A tree entry being dragged (to drop its path on a terminal).
@@ -115,6 +117,11 @@ struct Win {
     images: Vec<mao_render::ImageDraw>,
     /// A shell asked to show this file (`mao open`).
     pending_open: Option<PathBuf>,
+    /// System sampler; created when a panel first needs it.
+    sampler: Option<mao_sysmon::Sampler>,
+    detectors: Arc<Vec<mao_agents::Detector>>,
+    /// Clickable geometry of the sidebar panels (last frame).
+    panel_hits: crate::panels::PanelHits,
 }
 
 pub struct App {
@@ -244,6 +251,9 @@ impl App {
             doc_colors: doc_colors(&self.config.theme),
             images: Vec::new(),
             pending_open: None,
+            sampler: None,
+            detectors: Arc::new(detectors(&self.config)),
+            panel_hits: crate::panels::PanelHits::default(),
         };
         win.new_tab(&self.config)?;
         tracing::debug!(ms = t.elapsed().as_millis(), "startup: shell spawned");
@@ -297,6 +307,19 @@ impl Win {
     /// Keeps the file explorer pointed at the focused pane's folder, and its
     /// service running only while it is on screen.
     fn sync_sidebar(&mut self) {
+        // The sampler runs only while the agents or monitor panel is shown.
+        let interest = self.sidebar.interest();
+        if interest.any() && self.sampler.is_none() {
+            let proxy = self.proxy.clone();
+            let sampler = mao_sysmon::Sampler::new(move |snap| {
+                let _ = proxy.send_event(UserEvent::Sys(snap));
+            });
+            sampler.set_detail_filter(Some(mao_agents::detail_filter(Arc::clone(&self.detectors))));
+            self.sampler = Some(sampler);
+        }
+        if let Some(sampler) = self.sampler.as_mut() {
+            sampler.set_interest(interest);
+        }
         if !self.sidebar.files_active() {
             self.sidebar.files.deactivate();
             return;
@@ -422,6 +445,13 @@ impl Win {
                     tracing::warn!("cannot reveal {}: {e}", path.display());
                 }
             }
+            // Process actions are handled by the context menu itself.
+            FileAction::GoToPane
+            | FileAction::OpenSessions
+            | FileAction::CopyPid
+            | FileAction::KillProcess
+            | FileAction::ConfirmKill
+            | FileAction::Cancel => {}
         }
     }
 
@@ -1248,8 +1278,52 @@ impl Win {
                 palette: self.palette.as_ref(),
                 context: self.context.as_ref(),
                 sidebar: &self.sidebar,
+                panel_hits: &self.panel_hits,
             },
         )
+    }
+
+    /// A system sample arrived: refresh the monitor and the agents list.
+    fn on_sample(&mut self, snap: Arc<mao_sysmon::Snapshot>) {
+        if let Some(procs) = snap.processes.as_ref() {
+            // Shell pid → (pane, tab), to tell which agents run inside Mao-Term.
+            let mut shells: HashMap<u32, (PaneId, usize)> = HashMap::new();
+            for (t, tab) in self.ws.tabs.iter().enumerate() {
+                for id in tab.tree.panes() {
+                    if let Some(pid) = self.ws.panes.get(&id).and_then(|p| p.terminal.pid()) {
+                        shells.insert(pid, (id, t));
+                    }
+                }
+            }
+            let entries = mao_agents::detect(procs, &self.detectors)
+                .into_iter()
+                .map(|agent| {
+                    let pane = agent.ancestors.iter().find_map(|a| shells.get(a).copied());
+                    crate::sidebar::AgentEntry { agent, pane }
+                })
+                .collect();
+            self.sidebar.agents.set(entries);
+        }
+        self.sidebar.monitor.snap = Some(snap);
+        if self.sidebar.visible {
+            self.window.request_redraw();
+        }
+    }
+
+    /// Focuses a pane wherever it is.
+    fn go_to_pane(&mut self, id: PaneId) {
+        if let Some(t) = self.ws.tab_of(id) {
+            self.activate_tab(t);
+            self.ws.focus(id);
+            self.sidebar.files.focused = false;
+            self.update_title();
+            self.window.request_redraw();
+        }
+    }
+
+    /// Opens a terminal tab in `dir`.
+    fn open_tab_in(&mut self, config: &Config, dir: &std::path::Path) {
+        self.file_action(config, FileAction::OpenInNewTab, dir);
     }
 
     fn update_hover(&mut self) {
@@ -1266,6 +1340,8 @@ impl Win {
             | Hit::Activity(_)
             | Hit::ContextItem(_)
             | Hit::DocButton(..)
+            | Hit::MonitorSort(_)
+            | Hit::Process(_)
             | Hit::SidebarRow(_) => CursorIcon::Pointer,
             Hit::None | Hit::Palette | Hit::Sidebar | Hit::Context => CursorIcon::Default,
         };
@@ -1397,7 +1473,36 @@ impl Win {
             if let Hit::ContextItem(i) = hit
                 && let Some(&action) = menu.items.get(i)
             {
-                self.file_action(config, action, &menu.target);
+                match action {
+                    FileAction::GoToPane => {
+                        if let Some(id) = menu.pane {
+                            self.go_to_pane(id);
+                        }
+                    }
+                    FileAction::OpenSessions => {
+                        if let Some(dir) = &menu.sessions
+                            && let Err(e) = mao_fs::open_with_default_app(dir)
+                        {
+                            tracing::warn!("cannot open {}: {e}", dir.display());
+                        }
+                    }
+                    FileAction::CopyPid => {
+                        if let (Some((pid, _)), Some(clipboard)) =
+                            (&menu.process, self.clipboard.as_mut())
+                        {
+                            let _ = clipboard.set_text(pid.to_string());
+                        }
+                    }
+                    // Ask again before killing.
+                    FileAction::KillProcess => self.context = Some(menu.confirm_kill()),
+                    FileAction::ConfirmKill => {
+                        if let (Some((pid, _)), Some(sampler)) = (&menu.process, &self.sampler) {
+                            sampler.kill(*pid);
+                        }
+                    }
+                    FileAction::Cancel => {}
+                    _ => self.file_action(config, action, &menu.target),
+                }
             }
             self.window.request_redraw();
             return Flow::Continue;
@@ -1478,6 +1583,49 @@ impl Win {
                 }
                 self.window.request_redraw();
             }
+            (Hit::SidebarRow(i), MouseButton::Left | MouseButton::Right)
+                if self.sidebar.panel == Panel::Agents =>
+            {
+                if let Some(entry) = self.sidebar.agents.entry_at_row(i).cloned() {
+                    self.sidebar.agents.selected = Some(entry.agent.pid);
+                    if button == MouseButton::Right {
+                        self.context = Some(ContextMenu::agent(
+                            self.cursor.x as f32,
+                            self.cursor.y as f32,
+                            &entry,
+                        ));
+                    } else if let Some((pane, _)) = entry.pane {
+                        self.go_to_pane(pane);
+                    } else if let Some(cwd) = &entry.agent.cwd {
+                        self.open_tab_in(config, cwd);
+                    }
+                    self.window.request_redraw();
+                }
+            }
+            (Hit::MonitorSort(sort), MouseButton::Left) => {
+                self.sidebar.monitor.sort = sort;
+                self.window.request_redraw();
+            }
+            (Hit::Process(pid), MouseButton::Left | MouseButton::Right) => {
+                self.sidebar.monitor.selected = Some(pid);
+                if button == MouseButton::Right {
+                    let name = self
+                        .sidebar
+                        .monitor
+                        .snap
+                        .as_ref()
+                        .and_then(|s| s.processes.as_ref())
+                        .and_then(|ps| ps.iter().find(|p| p.pid == pid))
+                        .map_or_else(|| "process".to_owned(), |p| p.name.clone());
+                    self.context = Some(ContextMenu::process(
+                        self.cursor.x as f32,
+                        self.cursor.y as f32,
+                        pid,
+                        name,
+                    ));
+                }
+                self.window.request_redraw();
+            }
             (Hit::SidebarRow(i), MouseButton::Left | MouseButton::Right) => {
                 let rows = self.sidebar.files.row_paths();
                 if let Some((path, is_dir)) = rows.get(i).cloned() {
@@ -1537,7 +1685,10 @@ impl Win {
     fn on_wheel(&mut self, delta: winit::event::MouseScrollDelta) {
         let (cell, mods, pos) = (self.cell(), input::modifiers(self.modifiers), self.cursor);
         let hit = self.hit();
-        if matches!(hit, Hit::SidebarRow(_) | Hit::Sidebar) {
+        if matches!(
+            hit,
+            Hit::SidebarRow(_) | Hit::Sidebar | Hit::Process(_) | Hit::MonitorSort(_)
+        ) {
             let rows = match delta {
                 winit::event::MouseScrollDelta::LineDelta(_, y) => -(y * 3.0) as isize,
                 winit::event::MouseScrollDelta::PixelDelta(p) => {
@@ -1545,7 +1696,15 @@ impl Win {
                 }
             };
             let visible = self.layout.visible_rows(&self.metrics);
-            self.sidebar.files.scroll_by(rows, visible);
+            match self.sidebar.panel {
+                Panel::Files => self.sidebar.files.scroll_by(rows, visible),
+                Panel::Agents => self.sidebar.agents.scroll_by(rows, visible),
+                Panel::Monitor => {
+                    let max = (self.panel_hits.content_h - self.layout.sidebar_rows.h).max(0.0);
+                    let m = &mut self.sidebar.monitor;
+                    m.scroll = (m.scroll + rows as f32 * self.metrics.row).clamp(0.0, max);
+                }
+            }
             self.update_hover();
             self.window.request_redraw();
             return;
@@ -1752,7 +1911,7 @@ impl Win {
                 above,
             })
         });
-        chrome::draw(
+        self.panel_hits = chrome::draw(
             &mut self.ui,
             &DrawState {
                 layout: &self.layout,
@@ -1832,6 +1991,7 @@ impl ApplicationHandler<UserEvent> for App {
                 w.window.request_redraw();
             }
             UserEvent::Doc(doc) => w.on_document(doc),
+            UserEvent::Sys(snap) => w.on_sample(snap),
             UserEvent::Executables(names) => {
                 tracing::debug!(count = names.len(), "PATH executables scanned");
                 w.engine.set_executables(names);
@@ -1942,6 +2102,28 @@ fn spawn_terminal(
         },
     )?;
     Ok(terminal)
+}
+
+/// Built-in agent detectors plus the user's (same name = replaced).
+fn detectors(config: &Config) -> Vec<mao_agents::Detector> {
+    let mut list = mao_agents::default_detectors();
+    for d in &config.agents.detectors {
+        let detector = mao_agents::Detector {
+            name: d.name.clone(),
+            exe: d.exe.clone(),
+            cmdline: d.cmdline.clone(),
+            exclude: d.exclude.clone(),
+            sessions_dir: d.sessions_dir.clone(),
+        };
+        match list
+            .iter_mut()
+            .find(|x| x.name.eq_ignore_ascii_case(&d.name))
+        {
+            Some(slot) => *slot = detector,
+            None => list.push(detector),
+        }
+    }
+    list
 }
 
 /// Document colors from the terminal theme.

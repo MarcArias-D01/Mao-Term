@@ -41,6 +41,7 @@ pub struct Config {
     pub terminal: TerminalConfig,
     pub shell: ShellConfig,
     pub input: InputConfig,
+    pub agents: AgentsConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -160,6 +161,28 @@ impl Default for InputConfig {
     }
 }
 
+/// The agents panel (docs/specs/agents-panel.md).
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentsConfig {
+    /// Extra agents to recognize (a detector with a built-in name replaces it).
+    #[serde(rename = "detector")]
+    pub detectors: Vec<AgentDetector>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentDetector {
+    pub name: String,
+    /// Executable names, without `.exe`.
+    pub exe: Vec<String>,
+    /// Substrings of a command-line argument (agents running under node/python).
+    pub cmdline: Vec<String>,
+    /// Substrings of the executable path/arguments that rule a process out.
+    pub exclude: Vec<String>,
+    pub sessions_dir: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WindowConfig {
@@ -258,6 +281,14 @@ pub const CONFIG_TEMPLATE: &str = r##"# Mao-Term configuration. Every value belo
 # [input]
 # editor = true               # Mao-Term's own line editor at the prompt
 # suggestions = true          # history ghost text
+
+# Extra AI agents for the agents panel (built-in: Claude Code, opencode, Codex,
+# Gemini CLI, Aider, Cursor Agent, Goose, Amp, Copilot CLI). Example:
+## [[agents.detector]]
+## name = "My Agent"
+## exe = ["my-agent"]                 # executable name, without .exe
+## cmdline = ["my-agent/cli.js"]      # or a substring of its command line
+## sessions_dir = "~/.my-agent/sessions"
 
 # [theme]
 # background = "#14161b"

@@ -36,6 +36,8 @@ pub struct Sidebar {
     /// Width in logical pixels.
     pub width: f32,
     pub files: Files,
+    pub agents: AgentsView,
+    pub monitor: MonitorView,
 }
 
 impl Default for Sidebar {
@@ -45,6 +47,8 @@ impl Default for Sidebar {
             panel: Panel::Files,
             width: DEFAULT_WIDTH,
             files: Files::default(),
+            agents: AgentsView::default(),
+            monitor: MonitorView::default(),
         }
     }
 }
@@ -53,6 +57,117 @@ impl Sidebar {
     /// Whether the file explorer is on screen (and must keep its watchers).
     pub fn files_active(&self) -> bool {
         self.visible && self.panel == Panel::Files
+    }
+
+    /// What the system sampler must collect for the panel on screen.
+    pub fn interest(&self) -> mao_sysmon::Interest {
+        mao_sysmon::Interest {
+            metrics: self.visible && self.panel == Panel::Monitor,
+            processes: self.visible && matches!(self.panel, Panel::Agents | Panel::Monitor),
+        }
+    }
+}
+
+/// An agent session and where it runs.
+#[derive(Debug, Clone)]
+pub struct AgentEntry {
+    pub agent: mao_agents::Agent,
+    /// The Mao-Term pane (and its tab index) running it.
+    pub pane: Option<(mao_ui::PaneId, usize)>,
+}
+
+/// A line of the agents list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentRow {
+    /// Project header (index into `groups`).
+    Group(usize),
+    /// An agent (index into `entries`), first or second line.
+    Agent(usize, u8),
+}
+
+#[derive(Debug, Default)]
+pub struct AgentsView {
+    pub entries: Vec<AgentEntry>,
+    /// Project folder and the entries working in it.
+    pub groups: Vec<(Option<PathBuf>, Vec<usize>)>,
+    /// At least one scan finished.
+    pub scanned: bool,
+    pub selected: Option<u32>,
+    pub scroll: usize,
+}
+
+impl AgentsView {
+    pub fn set(&mut self, entries: Vec<AgentEntry>) {
+        self.groups.clear();
+        for (i, e) in entries.iter().enumerate() {
+            match self.groups.last_mut() {
+                Some((cwd, list)) if *cwd == e.agent.cwd => list.push(i),
+                _ => self.groups.push((e.agent.cwd.clone(), vec![i])),
+            }
+        }
+        self.entries = entries;
+        self.scanned = true;
+    }
+
+    pub fn rows(&self) -> Vec<AgentRow> {
+        let mut rows = Vec::new();
+        for (g, (_, list)) in self.groups.iter().enumerate() {
+            rows.push(AgentRow::Group(g));
+            for &i in list {
+                rows.push(AgentRow::Agent(i, 0));
+                rows.push(AgentRow::Agent(i, 1));
+            }
+        }
+        rows
+    }
+
+    pub fn entry_at_row(&self, row: usize) -> Option<&AgentEntry> {
+        match self.rows().get(row)? {
+            AgentRow::Agent(i, _) => self.entries.get(*i),
+            AgentRow::Group(_) => None,
+        }
+    }
+
+    pub fn scroll_by(&mut self, rows: isize, visible: usize) {
+        let max = self.rows().len().saturating_sub(visible);
+        self.scroll = (self.scroll as isize + rows).clamp(0, max as isize) as usize;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortBy {
+    #[default]
+    Cpu,
+    Memory,
+}
+
+#[derive(Debug, Default)]
+pub struct MonitorView {
+    pub snap: Option<std::sync::Arc<mao_sysmon::Snapshot>>,
+    pub sort: SortBy,
+    /// Scroll offset in pixels.
+    pub scroll: f32,
+    pub selected: Option<u32>,
+}
+
+/// Processes shown in the monitor's list.
+pub const TOP_PROCESSES: usize = 12;
+
+impl MonitorView {
+    /// The busiest processes by the current sort key.
+    pub fn top(&self) -> Vec<&mao_sysmon::ProcInfo> {
+        let Some(procs) = self.snap.as_ref().and_then(|s| s.processes.as_ref()) else {
+            return Vec::new();
+        };
+        let mut list: Vec<&mao_sysmon::ProcInfo> = procs.iter().filter(|p| p.pid != 0).collect();
+        match self.sort {
+            SortBy::Cpu => {
+                list.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.memory.cmp(&a.memory)))
+            }
+            SortBy::Memory => list.sort_by_key(|p| std::cmp::Reverse(p.memory)),
+        }
+        list.truncate(TOP_PROCESSES);
+        list
     }
 }
 

@@ -20,8 +20,8 @@
 | [input-autocomplete](specs/input-autocomplete.md) | M3 | In progress |
 | [file-tree](specs/file-tree.md) | M4 | In progress |
 | [document-viewer](specs/document-viewer.md) | M5 | In progress |
-| [agents-panel](specs/agents-panel.md) | M6 | Draft |
-| [system-monitor](specs/system-monitor.md) | M6 | Draft |
+| [agents-panel](specs/agents-panel.md) | M6 | In progress |
+| [system-monitor](specs/system-monitor.md) | M6 | In progress |
 | [config-theming](specs/config-theming.md) | M0–M7 | Draft |
 
 ## Decisions

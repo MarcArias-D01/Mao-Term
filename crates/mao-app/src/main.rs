@@ -10,6 +10,7 @@ mod input;
 mod overlay;
 mod palette;
 mod pane;
+mod panels;
 mod sidebar;
 mod workspace;
 

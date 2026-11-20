@@ -95,11 +95,16 @@ Next steps for startup: create the GPU device in parallel with window creation a
 - ⬜ Huge files (> 64 MB) by chunks/mmap; lazy highlighting of the visible part only.
 - ⬜ Inline images in Markdown, clickable links, JSON folding, animated GIFs.
 
-## M6 — Agents + monitor ⬜
+## M6 — Agents + monitor 🟨
 
-- ⬜ Agents panel: process detection (Claude Code, opencode, Codex, Gemini CLI, Aider…), jump to pane, open its cwd.
-- ⬜ Monitor panel: CPU, RAM, disk, network, top processes.
-- ⬜ Status bar indicators.
+- ✅ `mao-sysmon`: sampler thread on `sysinfo`, only while a panel needs it (0% CPU otherwise), 60 s history, kill.
+- ✅ `mao-agents`: configurable detectors (Claude Code, opencode, Codex, Gemini CLI, Aider, Cursor Agent, Goose, Amp, Copilot CLI + `[[agents.detector]]`), root-process dedupe, child processes folded into the session, desktop/editor look-alikes excluded.
+- ✅ Agents panel: grouped by project, pid · uptime · CPU · memory, "tab N" when running in a Mao-Term pane (shell pid ancestry); click = go to pane / open a tab in its folder; context menu (go to pane, open in new tab, reveal, copy path/PID, sessions folder, kill with confirmation); activity bar badge.
+- ✅ Monitor panel: CPU graph + per-core bars, memory graph, page file, network graph, disks, uptime/OS, top processes sortable by CPU/memory with kill.
+- ✅ Status bar: agents count, CPU and RAM while a sampling panel is open.
+- ⬜ Config hot reload (new detectors without restart); background counter mode.
+- ⬜ Sampling cost < 1% of a core (measured ~1.7% total with the monitor open).
+- ⬜ Battery, temperatures, disk I/O, per-interface network, alert thresholds; verify on Linux.
 
 ## M7 — Polish and distribution ⬜
 

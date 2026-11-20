@@ -9,7 +9,8 @@ use mao_ui::{Divider, PaneId, Rect};
 use crate::docpane::{DocButton, DocPane};
 use crate::editor::{MENU_ROWS, Menu};
 use crate::palette::{MAX_VISIBLE, Palette};
-use crate::sidebar::{Panel, Sidebar};
+use crate::panels::{self, PanelHits};
+use crate::sidebar::{Panel, Sidebar, SortBy};
 use crate::workspace::Workspace;
 
 /// Pixel sizes derived from the display scale.
@@ -178,11 +179,24 @@ pub enum FileAction {
     CopyPath,
     CopyRelativePath,
     Reveal,
+    /// Agents and processes.
+    GoToPane,
+    OpenSessions,
+    CopyPid,
+    KillProcess,
+    ConfirmKill,
+    Cancel,
 }
 
 impl FileAction {
     fn label(self) -> &'static str {
         match self {
+            Self::GoToPane => "Go to Pane",
+            Self::OpenSessions => "Open Sessions Folder",
+            Self::CopyPid => "Copy PID",
+            Self::KillProcess => "Kill Process…",
+            Self::ConfirmKill => "Kill",
+            Self::Cancel => "Cancel",
             Self::Open => "Open",
             Self::OpenExternally => "Open with Default App",
             Self::Cd => "cd Here",
@@ -208,9 +222,68 @@ pub struct ContextMenu {
     pub y: f32,
     pub target: std::path::PathBuf,
     pub items: Vec<FileAction>,
+    /// Process the menu is about (agents and monitor), with its name.
+    pub process: Option<(u32, String)>,
+    pub sessions: Option<std::path::PathBuf>,
+    pub pane: Option<PaneId>,
 }
 
 impl ContextMenu {
+    /// Menu of an agent session.
+    pub fn agent(x: f32, y: f32, e: &crate::sidebar::AgentEntry) -> Self {
+        use FileAction::*;
+        let a = &e.agent;
+        let mut items = Vec::new();
+        if e.pane.is_some() {
+            items.push(GoToPane);
+        }
+        if a.cwd.is_some() {
+            items.extend([OpenInNewTab, Reveal, CopyPath]);
+        }
+        if a.sessions_dir.is_some() {
+            items.push(OpenSessions);
+        }
+        items.extend([CopyPid, KillProcess]);
+        Self {
+            x,
+            y,
+            target: a.cwd.clone().unwrap_or_default(),
+            items,
+            process: Some((a.pid, a.name.clone())),
+            sessions: a.sessions_dir.clone(),
+            pane: e.pane.map(|(p, _)| p),
+        }
+    }
+
+    /// Menu of a process in the monitor.
+    pub fn process(x: f32, y: f32, pid: u32, name: String) -> Self {
+        Self {
+            x,
+            y,
+            target: std::path::PathBuf::new(),
+            items: vec![FileAction::CopyPid, FileAction::KillProcess],
+            process: Some((pid, name)),
+            sessions: None,
+            pane: None,
+        }
+    }
+
+    /// The same menu turned into a kill confirmation.
+    pub fn confirm_kill(&self) -> Self {
+        Self {
+            items: vec![FileAction::ConfirmKill, FileAction::Cancel],
+            ..self.clone()
+        }
+    }
+
+    /// Label of an item (some depend on the target).
+    pub fn label(&self, action: FileAction) -> String {
+        match (action, &self.process) {
+            (FileAction::ConfirmKill, Some((pid, name))) => format!("Kill {name} (pid {pid})"),
+            _ => action.label().to_owned(),
+        }
+    }
+
     pub fn new(x: f32, y: f32, target: std::path::PathBuf, is_dir: bool) -> Self {
         use FileAction::*;
         let items = if is_dir {
@@ -237,6 +310,9 @@ impl ContextMenu {
             y,
             target,
             items,
+            process: None,
+            sessions: None,
+            pane: None,
         }
     }
 
@@ -284,6 +360,10 @@ pub enum Hit {
     Context,
     /// A button in a document pane's header.
     DocButton(PaneId, DocButton),
+    /// A column header of the monitor's process list.
+    MonitorSort(SortBy),
+    /// A process row in the monitor.
+    Process(u32),
 }
 
 /// What hit-testing needs to know about the window.
@@ -294,6 +374,8 @@ pub struct Scene<'a> {
     pub palette: Option<&'a Palette>,
     pub context: Option<&'a ContextMenu>,
     pub sidebar: &'a Sidebar,
+    /// Panel geometry from the last frame.
+    pub panel_hits: &'a PanelHits,
 }
 
 pub fn hit_test(x: f32, y: f32, scene: &Scene<'_>) -> Hit {
@@ -304,6 +386,7 @@ pub fn hit_test(x: f32, y: f32, scene: &Scene<'_>) -> Hit {
         palette,
         context,
         sidebar,
+        panel_hits,
     } = *scene;
     if let Some(menu) = context {
         let (frame, rows) = menu.geometry(layout, m);
@@ -337,10 +420,26 @@ pub fn hit_test(x: f32, y: f32, scene: &Scene<'_>) -> Hit {
             return Hit::SidebarEdge;
         }
         if sb.contains(x, y) {
-            if sidebar.panel == Panel::Files && layout.sidebar_rows.contains(x, y) {
-                let i = ((y - layout.sidebar_rows.y) / m.row) as usize + sidebar.files.scroll;
-                if i < sidebar.files.tree.rows().len() {
-                    return Hit::SidebarRow(i);
+            if layout.sidebar_rows.contains(x, y) {
+                let row = ((y - layout.sidebar_rows.y) / m.row) as usize;
+                match sidebar.panel {
+                    Panel::Files => {
+                        let i = row + sidebar.files.scroll;
+                        if i < sidebar.files.tree.rows().len() {
+                            return Hit::SidebarRow(i);
+                        }
+                    }
+                    Panel::Agents => {
+                        let i = row + sidebar.agents.scroll;
+                        if sidebar.agents.entry_at_row(i).is_some() {
+                            return Hit::SidebarRow(i);
+                        }
+                    }
+                    Panel::Monitor => {
+                        if let Some(hit) = panel_hits.hit(x, y) {
+                            return hit;
+                        }
+                    }
                 }
             }
             return Hit::Sidebar;
@@ -404,17 +503,19 @@ fn doc_buttons(doc: &DocPane, m: &Metrics) -> Vec<(DocButton, Rect, &'static str
 
 /// Colors derived from the terminal theme.
 pub struct Colors {
-    bg: Rgb8,
-    fg: Rgb8,
-    dim: Rgb8,
-    accent: Rgb8,
-    selection: Rgb8,
-    chrome: Rgb8,
-    hover: Rgb8,
-    divider: Rgb8,
-    raised: Rgb8,
-    branch: Rgb8,
-    option: Rgb8,
+    pub(crate) bg: Rgb8,
+    pub(crate) fg: Rgb8,
+    pub(crate) dim: Rgb8,
+    pub(crate) accent: Rgb8,
+    pub(crate) selection: Rgb8,
+    pub(crate) chrome: Rgb8,
+    pub(crate) hover: Rgb8,
+    pub(crate) divider: Rgb8,
+    pub(crate) raised: Rgb8,
+    pub(crate) branch: Rgb8,
+    pub(crate) option: Rgb8,
+    pub(crate) warn: Rgb8,
+    pub(crate) error: Rgb8,
 }
 
 impl Colors {
@@ -434,6 +535,8 @@ impl Colors {
             raised: mix(bg, fg, 0.06),
             branch: theme.ansi[10].to_array(),
             option: theme.ansi[14].to_array(),
+            warn: theme.ansi[11].to_array(),
+            error: theme.ansi[9].to_array(),
         }
     }
 }
@@ -462,6 +565,9 @@ const KEY_TREE_ICON: u64 = 15 << 48;
 const KEY_CONTEXT: u64 = 16 << 48;
 const KEY_DRAG: u64 = 17 << 48;
 const KEY_DOC: u64 = 18 << 48;
+pub(crate) const KEY_AGENTS: u64 = 19 << 48;
+pub(crate) const KEY_MONITOR: u64 = 20 << 48;
+const KEY_BADGE: u64 = 21 << 48;
 
 /// Icon glyphs: Segoe Fluent/MDL2 code points, or plain fallbacks.
 struct Icons {
@@ -525,11 +631,13 @@ pub struct DrawState<'a> {
     pub menu: Option<MenuView<'a>>,
 }
 
-pub fn draw(ui: &mut UiFrame, s: &DrawState<'_>) {
+/// Draws the chrome; returns the panels' clickable geometry.
+pub fn draw(ui: &mut UiFrame, s: &DrawState<'_>) -> PanelHits {
     ui.clear();
     draw_activity_bar(ui, s);
+    let mut hits = PanelHits::default();
     if let Some(r) = s.layout.sidebar {
-        draw_sidebar(ui, s, r);
+        hits = draw_sidebar(ui, s, r);
     }
     draw_tab_bar(ui, s);
     draw_docs(ui, s);
@@ -549,9 +657,10 @@ pub fn draw(ui: &mut UiFrame, s: &DrawState<'_>) {
     if let Some(p) = s.palette {
         draw_palette(top, s, p);
     }
+    hits
 }
 
-fn icon(key: u64, glyph: &str, r: Rect, size: f32, color: Rgb8) -> UiText {
+pub(crate) fn icon(key: u64, glyph: &str, r: Rect, size: f32, color: Rgb8) -> UiText {
     let mut t = text(key, glyph, r, size, color, Align::Center);
     t.icon = true;
     t
@@ -578,10 +687,25 @@ fn draw_activity_bar(ui: &mut UiFrame, s: &DrawState<'_>) {
         let color = if active || hovered { c.fg } else { c.dim };
         ui.texts
             .push(icon(KEY_ACTIVITY | i as u64, glyph, *r, m.px(20.0), color));
+        // Number of agents running (known while the agents/monitor panel samples).
+        let agents = s.sidebar.agents.entries.len();
+        if *act == Activity::Panel(Panel::Agents) && agents > 0 && s.sidebar.interest().processes {
+            let d = m.px(14.0);
+            let b = Rect::new(r.right() - d - m.px(4.0), r.y + m.px(5.0), d, d);
+            ui.rect(b.x, b.y, b.w, b.h, c.accent);
+            ui.texts.push(text(
+                KEY_BADGE,
+                agents.min(99).to_string(),
+                b,
+                m.ui_text * 0.72,
+                c.bg,
+                Align::Center,
+            ));
+        }
     }
 }
 
-fn draw_sidebar(ui: &mut UiFrame, s: &DrawState<'_>, r: Rect) {
+fn draw_sidebar(ui: &mut UiFrame, s: &DrawState<'_>, r: Rect) -> PanelHits {
     let (l, m, c) = (s.layout, s.metrics, s.colors);
     ui.rect(r.x, r.y, r.w, r.h, c.chrome);
     let edge = if *s.hover == Hit::SidebarEdge {
@@ -608,20 +732,37 @@ fn draw_sidebar(ui: &mut UiFrame, s: &DrawState<'_>, r: Rect) {
     t.bold = true;
     ui.texts.push(t);
 
+    let subtitle = |ui: &mut UiFrame, label: String| {
+        let mut t = text(
+            KEY_SIDEBAR | 2,
+            label,
+            Rect::new(r.x + pad, r.y + m.px(32.0), r.w - 2.0 * pad, m.px(26.0)),
+            m.ui_text,
+            c.fg,
+            Align::Left,
+        );
+        t.bold = true;
+        ui.texts.push(t);
+    };
+    let _ = l;
     match s.sidebar.panel {
         Panel::Files => draw_files(ui, s, r),
-        Panel::Agents | Panel::Monitor => {
-            ui.texts.push(text(
-                KEY_SIDEBAR | 1,
-                "Coming in milestone M6.",
-                Rect::new(r.x + pad, r.y + m.px(34.0), r.w - 2.0 * pad, m.px(24.0)),
-                m.ui_text,
-                c.dim,
-                Align::Left,
-            ));
+        Panel::Agents => {
+            subtitle(ui, panels::agents_summary(s));
+            panels::draw_agents(ui, s);
+        }
+        Panel::Monitor => {
+            let host = s
+                .sidebar
+                .monitor
+                .snap
+                .as_ref()
+                .map_or_else(String::new, |snap| snap.host.clone());
+            subtitle(ui, host);
+            return panels::draw_monitor(ui, s);
         }
     }
-    let _ = l;
+    PanelHits::default()
 }
 
 fn draw_files(ui: &mut UiFrame, s: &DrawState<'_>, r: Rect) {
@@ -768,7 +909,7 @@ fn draw_context(ui: &mut UiFrame, s: &DrawState<'_>, menu: &ContextMenu) {
         let inner = Rect::new(row.x + m.px(10.0), row.y, row.w - m.px(20.0), row.h);
         ui.texts.push(text(
             KEY_CONTEXT | i as u64,
-            action.label(),
+            menu.label(*action),
             inner,
             m.ui_text,
             c.fg,
@@ -793,7 +934,7 @@ fn draw_drag(ui: &mut UiFrame, s: &DrawState<'_>, label: &str, x: f32, y: f32) {
     ));
 }
 
-fn text(
+pub(crate) fn text(
     key: u64,
     text: impl Into<String>,
     r: Rect,
@@ -1118,6 +1259,23 @@ fn draw_status(ui: &mut UiFrame, s: &DrawState<'_>) {
             )
         }
         _ => String::new(),
+    };
+    // Live metrics while a sampling panel is open.
+    let right = match s.sidebar.monitor.snap.as_deref() {
+        Some(snap) if s.sidebar.interest().any() => {
+            let agents = match s.sidebar.agents.entries.len() {
+                0 => String::new(),
+                1 => "1 agent  ·  ".into(),
+                n => format!("{n} agents  ·  "),
+            };
+            format!(
+                "{agents}CPU {:.0}%  ·  RAM {} / {}  ·  {right}",
+                snap.cpu,
+                mao_sysmon::human_bytes(snap.mem_used),
+                mao_sysmon::human_bytes(snap.mem_total)
+            )
+        }
+        _ => right,
     };
     ui.texts.push(text(
         KEY_STATUS | 1,

@@ -1,6 +1,6 @@
 # Spec: System monitor
 
-- **Status:** Draft
+- **Status:** In progress
 - **Milestone:** M6
 - **Crates:** `mao-sysmon`, `mao-ui`
 - **Related:** [agents-panel](agents-panel.md), [workspace-layout](workspace-layout.md)
@@ -38,11 +38,19 @@ A button that shows the machine's performance and health at a glance, without op
 - Sampling cost < 1% of one core with the panel open.
 - 0 with the panel closed and the status bar disabled.
 
+## Implementation notes (M6)
+
+- Panel in the sidebar: CPU (60 s graph, per-core bars, frequency), memory (graph) and page file/swap, network (↓ graph with ↑ overlay), disks, uptime and OS, top 12 processes sortable by CPU/memory, context menu (copy PID, kill with confirmation). Colors turn yellow ≥ 75% and red ≥ 90%.
+- Sampling cost (Windows, ~400 processes): CPU/memory < 1 ms, network table ~8 ms (refreshed every 2 s), process list ~20 ms (every 3 s with the monitor open). **Measured total with the panel open: ~1.7% of one core** (sampling ≈ 1.2% + one redraw per second) — slightly above the < 1% goal. Closed: 0%, the thread blocks on its channel and `sysinfo` state is dropped.
+- `sysinfo`'s `multithread` feature is off (rayon's spinning cost more than it saved).
+- Status bar shows CPU/RAM/agents only while a sampling panel is open (no background sampling, to keep idle at 0%).
+- Not yet: battery, temperatures, per-interface network, disk I/O rates, alert thresholds.
+
 ## Acceptance criteria
 
-- [ ] Values roughly match (±5%) Task Manager / `htop`.
-- [ ] Closing the panel stops sampling (verifiable in logs).
-- [ ] Works without administrator privileges.
+- [x] Values roughly match (±5%) Task Manager / `htop` (checked by eye on Windows: memory 85%, page file, disk C:).
+- [x] Closing the panel stops sampling (verified: 0% CPU and `sysmon sample` traces stop).
+- [x] Works without administrator privileges.
 
 ## Open questions
 

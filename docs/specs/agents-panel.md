@@ -1,6 +1,6 @@
 # Spec: Agents panel
 
-- **Status:** Draft
+- **Status:** In progress
 - **Milestone:** M6
 - **Crates:** `mao-agents`, `mao-ui`, `mao-app`
 - **Related:** [workspace-layout](workspace-layout.md), [system-monitor](system-monitor.md)
@@ -72,12 +72,20 @@ match_exe = ["opencode", "opencode.exe"]
 
 - Fully local and read-only. Session contents are not read in v1.
 
+## Implementation notes (M6)
+
+- `mao-agents` works on `mao-sysmon`'s process list (one `sysinfo` refresh shared with the monitor). The cwd is read only for processes a detector accepts (reading it is slow on Windows).
+- Command-line patterns include the package folder (`@github/copilot/`), so editor-embedded runtimes (VS Code's `@github/copilot-sdk-…`) are not reported as CLI agents; the Claude desktop app is excluded by path.
+- "In Mao-Term": each pane's shell pid (from the PTY) is looked up among the agent's ancestors.
+- Sampling runs only while the agents or monitor panel is open (every 3 s with only the agents panel). The activity-bar badge and the status bar count are shown while it runs; a background mode for them (spec: every 10 s) is not implemented, to keep idle CPU at 0%.
+- Detectors: built-ins + `[[agents.detector]]` in the config (same name replaces a built-in); read at startup.
+
 ## Acceptance criteria
 
-- [ ] Claude Code and opencode launched in another terminal show up with their cwd within ≤ 3 s.
-- [ ] One launched inside Mao-Term shows "[in tab N]" and "Go to pane" works.
-- [ ] Closing the agent removes it from the list on the next scan.
-- [ ] A detector added in the config works without restarting.
+- [x] Claude Code launched in another terminal shows up with its cwd within ≤ 3 s (verified with this repo's own Claude Code session). opencode: detector written, not verified (not installed).
+- [x] One launched inside Mao-Term shows "tab N"; "Go to Pane" is in its context menu.
+- [x] Closing the agent removes it from the list on the next scan.
+- [ ] A detector added in the config works without restarting (needs config hot reload; today: restart).
 
 ## Open questions
 

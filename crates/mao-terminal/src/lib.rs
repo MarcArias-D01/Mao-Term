@@ -246,6 +246,8 @@ pub struct Terminal {
     term: Arc<FairMutex<Term<EventProxy>>>,
     proxy: EventProxy,
     kind: ShellKind,
+    /// Process id of the shell (if the platform reports it).
+    pid: Option<u32>,
     size: GridSize,
     palette: Palette,
     // Render state, reused across frames to avoid allocations.
@@ -288,6 +290,10 @@ impl Terminal {
             escape_args: true,
         };
         let pty = tty::new(&pty_options, size.window_size(), 0).map_err(TerminalError::Pty)?;
+        #[cfg(windows)]
+        let pid = pty.child_watcher().pid().map(std::num::NonZeroU32::get);
+        #[cfg(not(windows))]
+        let pid = Some(pty.child().id());
 
         let notify: Arc<dyn Fn(TerminalEvent) + Send + Sync> = Arc::new(notify);
         let shell_notify = Arc::clone(&notify);
@@ -319,6 +325,7 @@ impl Terminal {
             term,
             proxy,
             kind,
+            pid,
             size,
             palette: options.palette,
             dirty: Vec::new(),
@@ -332,6 +339,11 @@ impl Terminal {
 
     pub fn size(&self) -> GridSize {
         self.size
+    }
+
+    /// Process id of the shell.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
     }
 
     /// The kind of shell running (for quoting and completion rules).
