@@ -78,7 +78,14 @@ fn echo_output_reaches_the_grid() {
         }
     }
 
-    let text = screen_text(&mut term);
+    // The exit event can arrive before the last output is parsed (the I/O
+    // thread drains the PTY right after reporting it): give it a moment.
+    let mut text = screen_text(&mut term);
+    let settle = Instant::now() + Duration::from_secs(3);
+    while !text.contains("mao-term-says-hello") && Instant::now() < settle {
+        std::thread::sleep(Duration::from_millis(50));
+        text = screen_text(&mut term);
+    }
     assert!(exit.is_some(), "process did not exit; screen:\n{text}");
     assert!(
         text.contains("mao-term-says-hello"),
