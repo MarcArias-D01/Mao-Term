@@ -284,7 +284,9 @@ impl Terminal {
         let pty_options = tty::Options {
             shell: Some(Shell::new(program, args)),
             working_directory: options.working_directory,
-            drain_on_exit: false,
+            // Unix: a short-lived child can exit before its output was read;
+            // drain the PTY on exit so that output isn't lost.
+            drain_on_exit: cfg!(unix),
             env,
             #[cfg(windows)]
             escape_args: true,
@@ -314,7 +316,7 @@ impl Terminal {
         };
         let term = Arc::new(FairMutex::new(Term::new(config, &size, proxy.clone())));
 
-        let event_loop = EventLoop::new(Arc::clone(&term), proxy.clone(), pty, false, false)
+        let event_loop = EventLoop::new(Arc::clone(&term), proxy.clone(), pty, cfg!(unix), false)
             .map_err(TerminalError::EventLoop)?;
         // `set` only fails if already set, which cannot happen here.
         let _ = proxy.0.sender.set(event_loop.channel());

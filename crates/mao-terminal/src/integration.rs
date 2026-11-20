@@ -23,11 +23,10 @@ pub enum ShellKind {
 
 impl ShellKind {
     pub fn detect(program: &str) -> Self {
-        let name = Path::new(program)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
+        // Both separators, whatever the OS (a Windows path in a shared config).
+        let file = program.rsplit(['/', '\\']).next().unwrap_or(program);
+        let file = file.to_ascii_lowercase();
+        let name = file.strip_suffix(".exe").unwrap_or(&file).to_owned();
         match name.as_str() {
             "pwsh" | "powershell" => Self::PowerShell,
             "bash" => Self::Bash,
