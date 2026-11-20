@@ -186,17 +186,17 @@ impl App {
         let win_cfg = &self.config.window;
         let custom_frame = win_cfg.decorations == mao_config::Decorations::Custom;
         let translucent = win_cfg.opacity < 1.0;
-        let mut attributes = Window::default_attributes()
+        let attributes = Window::default_attributes()
             .with_title("Mao-Term")
             .with_inner_size(LogicalSize::new(win_cfg.width, win_cfg.height))
             .with_decorations(!custom_frame)
             .with_transparent(translucent);
         #[cfg(windows)]
-        {
+        let attributes = {
             use winit::platform::windows::{
                 BackdropType, CornerPreference, WindowAttributesExtWindows,
             };
-            attributes = attributes
+            let mut attributes = attributes
                 .with_undecorated_shadow(true)
                 .with_corner_preference(CornerPreference::Round);
             if translucent {
@@ -209,7 +209,8 @@ impl App {
                         mao_config::Backdrop::None => BackdropType::None,
                     });
             }
-        }
+            attributes
+        };
         let attributes = attributes
             // Testing aid: open without taking keyboard focus, so automated checks
             // never capture what the user is typing elsewhere. Showing a hidden
