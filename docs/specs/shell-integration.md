@@ -20,6 +20,7 @@ Sequences emitted by our scripts (compatible with the de facto standard used by 
 | `OSC 133;C ST` | Command execution starts |
 | `OSC 133;D;<exit> ST` | Command finished with exit code |
 | `OSC 7;file://<host>/<path> ST` | Current directory |
+| `OSC 7770;open;file://<host>/<path> ST` | Mao-Term extension: show a file in the document viewer (sent by the `mao open <file>` shell function) |
 | `OSC 633;E;<cmd> ST` (or our own `OSC 1337`) | Executed command line (history) |
 
 - Scripts: `mao.ps1` (pwsh and Windows PowerShell), `mao.bash`, `mao.zsh`, `mao.fish`.

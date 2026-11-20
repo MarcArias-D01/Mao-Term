@@ -17,12 +17,14 @@ use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::actions::Action;
 use crate::chrome::{
     self, Activity, Colors, ContextMenu, DrawState, FileAction, Hit, Layout, MenuView, Metrics,
 };
+use crate::docpane::{DocButton, DocColors, DocPane};
 use crate::editor::{Ctx, Outcome};
 use crate::input;
 use crate::overlay::{self, OverlayColors};
@@ -48,6 +50,8 @@ pub enum UserEvent {
     Executables(Vec<String>),
     /// File explorer listings.
     Fs(mao_fs::FsEvent),
+    /// A document was loaded (or reloaded after a change on disk).
+    Doc(Arc<mao_docs::Document>),
 }
 
 /// A tree entry being dragged (to drop its path on a terminal).
@@ -103,6 +107,14 @@ struct Win {
     /// Dragging the sidebar's edge.
     sidebar_resize: bool,
     tree_drag: Option<TreeDrag>,
+    /// Loads documents; created when the first one is opened.
+    docs: Option<mao_docs::DocService>,
+    doc_theme: mao_docs::Theme,
+    doc_colors: DocColors,
+    /// Images drawn this frame.
+    images: Vec<mao_render::ImageDraw>,
+    /// A shell asked to show this file (`mao open`).
+    pending_open: Option<PathBuf>,
 }
 
 pub struct App {
@@ -227,6 +239,11 @@ impl App {
             context: None,
             sidebar_resize: false,
             tree_drag: None,
+            docs: None,
+            doc_theme: doc_theme(&self.config.theme),
+            doc_colors: doc_colors(&self.config.theme),
+            images: Vec::new(),
+            pending_open: None,
         };
         win.new_tab(&self.config)?;
         tracing::debug!(ms = t.elapsed().as_millis(), "startup: shell spawned");
@@ -364,7 +381,8 @@ impl Win {
                 .map_or_else(|| path.display().to_string(), |p| p.display().to_string())
         };
         match action {
-            FileAction::Open => {
+            FileAction::Open => self.open_document(config, path, true),
+            FileAction::OpenExternally => {
                 if let Err(e) = mao_fs::open_with_default_app(path) {
                     tracing::warn!("cannot open {}: {e}", path.display());
                 }
@@ -441,7 +459,8 @@ impl Win {
                     (true, true) => self.cd_into(config, &sel),
                     (true, false) => self.sidebar.files.toggle(&sel),
                     (false, true) => self.insert_path(config, &sel),
-                    (false, false) => self.file_action(config, FileAction::Open, &sel),
+                    // Preview it, keeping the tree focused for more browsing.
+                    (false, false) => self.open_document(config, &sel, false),
                 }
             }
             _ => {
@@ -469,8 +488,20 @@ impl Win {
         );
         let cell = self.cell();
         let (content, gap, pad) = (self.layout.content, self.metrics.gap, self.metrics.pad);
+        let header = chrome::doc_header(&self.metrics);
         for tab in &self.ws.tabs {
             for (id, rect) in tab.layout(content, gap) {
+                if let Some(doc) = self.ws.docs.get_mut(&id) {
+                    doc.set_rect(rect, header, pad, cell);
+                    let b = doc.body;
+                    self.renderer.set_grid_layout(
+                        id,
+                        doc.origin,
+                        doc.cols,
+                        doc.rows,
+                        [b.x, b.y, b.w, b.h],
+                    );
+                }
                 if let Some(pane) = self.ws.panes.get_mut(&id) {
                     let grid = pane.layout(rect, pad, cell);
                     self.renderer.set_grid_layout(
@@ -488,7 +519,174 @@ impl Win {
 
     /// Directory new shells start in: the focused pane's.
     fn current_cwd(&self) -> Option<PathBuf> {
+        if let Some(doc) = self.ws.focused_doc() {
+            return doc.path.parent().map(std::path::Path::to_path_buf);
+        }
         self.ws.focused_pane().and_then(|p| p.cwd.clone())
+    }
+
+    /// Shows `path` in a document pane: the active tab's (reused), or a new
+    /// one split to the right of the focused pane.
+    fn open_document(&mut self, config: &Config, path: &std::path::Path, focus: bool) {
+        let path = path.to_path_buf();
+        if path.is_dir() {
+            return;
+        }
+        let max_texture = self.renderer.max_texture_size();
+        let proxy = self.proxy.clone();
+        let theme = self.doc_theme;
+        let service = self.docs.get_or_insert_with(|| {
+            mao_docs::DocService::new(theme, max_texture, move |doc| {
+                let _ = proxy.send_event(UserEvent::Doc(doc));
+            })
+        });
+        let existing = self.ws.active_tab().and_then(|tab| {
+            tab.tree
+                .panes()
+                .into_iter()
+                .find(|id| self.ws.docs.contains_key(id))
+        });
+        let id = if let Some(id) = existing {
+            if let Some(doc) = self.ws.docs.get_mut(&id) {
+                if doc.path != path {
+                    service.close(&doc.path);
+                    service.open(&path);
+                    doc.replace_path(path);
+                    self.renderer.remove_image(id);
+                } else {
+                    service.reload(&path);
+                }
+            }
+            id
+        } else {
+            let Some(target) = self.ws.focused_id() else {
+                return;
+            };
+            let id = self.ws.next_id();
+            let Some(tab) = self.ws.active_tab_mut() else {
+                return;
+            };
+            tab.zoomed = None;
+            tab.tree.split(target, SplitDir::Right, id);
+            service.open(&path);
+            self.ws.docs.insert(id, DocPane::new(id, path));
+            id
+        };
+        if focus {
+            self.ws.focus(id);
+            self.sidebar.files.focused = false;
+        }
+        self.relayout(config.terminal.padding);
+        self.update_title();
+    }
+
+    /// A document finished loading: show it in every pane that has it open.
+    fn on_document(&mut self, doc: Arc<mao_docs::Document>) {
+        for pane in self.ws.docs.values_mut() {
+            if pane.path == doc.path {
+                pane.set_document(Arc::clone(&doc));
+                self.renderer.remove_image(pane.id);
+            }
+        }
+        self.window.request_redraw();
+    }
+
+    /// Keys while a document pane has focus. Returns `true` if handled.
+    fn on_doc_key(&mut self, config: &Config, event: &KeyEvent) -> bool {
+        let mods = input::modifiers(self.modifiers);
+        let Some(id) = self.ws.focused_id() else {
+            return false;
+        };
+        let Some(doc) = self.ws.docs.get_mut(&id) else {
+            return false;
+        };
+        let page = doc.rows.saturating_sub(1).max(1) as isize;
+        let image = doc.image().is_some();
+        let key = event.key_without_modifiers();
+
+        // Typing into the search box.
+        if doc.search.is_some() {
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => doc.close_search(),
+                Key::Named(NamedKey::Enter) => doc.search_step(!mods.shift),
+                Key::Named(NamedKey::Backspace) => doc.search_edit(|q| {
+                    q.pop();
+                }),
+                _ => match event.text.as_deref() {
+                    Some(t) if !mods.ctrl && !t.chars().any(char::is_control) => {
+                        doc.search_edit(|q| q.push_str(t));
+                    }
+                    _ => return self.doc_shortcut(config, event, id),
+                },
+            }
+            self.window.request_redraw();
+            return true;
+        }
+
+        match (&key, mods.ctrl, mods.shift, mods.alt) {
+            (Key::Named(NamedKey::ArrowDown), false, _, false) if image => doc.pan.1 -= 40.0,
+            (Key::Named(NamedKey::ArrowUp), false, _, false) if image => doc.pan.1 += 40.0,
+            (Key::Named(NamedKey::ArrowLeft), false, _, false) if image => doc.pan.0 += 40.0,
+            (Key::Named(NamedKey::ArrowRight), false, _, false) if image => doc.pan.0 -= 40.0,
+            (Key::Named(NamedKey::ArrowDown), false, false, false) => doc.scroll_by(1),
+            (Key::Named(NamedKey::ArrowUp), false, false, false) => doc.scroll_by(-1),
+            (Key::Named(NamedKey::ArrowRight), false, false, false) => doc.scroll_columns(4),
+            (Key::Named(NamedKey::ArrowLeft), false, false, false) => doc.scroll_columns(-4),
+            (Key::Named(NamedKey::PageDown), _, false, false)
+            | (Key::Named(NamedKey::Space), false, false, false) => {
+                doc.scroll_by(page);
+            }
+            (Key::Named(NamedKey::PageUp), _, false, false)
+            | (Key::Named(NamedKey::Space), false, true, false) => {
+                doc.scroll_by(-page);
+            }
+            (Key::Named(NamedKey::Home), _, false, false) => {
+                doc.scroll_by(isize::MIN / 2);
+                doc.hscroll = 0;
+            }
+            (Key::Named(NamedKey::End), _, false, false) => doc.scroll_by(isize::MAX / 2),
+            (Key::Named(NamedKey::Escape), false, false, false) => {
+                if !doc.clear_selection() {
+                    return false;
+                }
+            }
+            (Key::Character(c), false, _, false) if image && (c == "+" || c == "=") => {
+                doc.zoom_in()
+            }
+            (Key::Character(c), false, false, false) if image && c == "-" => doc.zoom_out(),
+            (Key::Character(c), false, false, false) if image && c == "0" => doc.zoom_fit(),
+            (Key::Character(c), false, false, false) if image && c == "1" => doc.zoom_actual(),
+            (Key::Character(c), true, false, false) if c == "a" => doc.select_all(),
+            _ => return self.doc_shortcut(config, event, id),
+        }
+        self.window.request_redraw();
+        true
+    }
+
+    /// Document shortcuts that map to actions (Ctrl+F, Alt+Z, F5, F3, Ctrl+C).
+    fn doc_shortcut(&mut self, config: &Config, event: &KeyEvent, id: PaneId) -> bool {
+        let mods = input::modifiers(self.modifiers);
+        let action = match (
+            event.key_without_modifiers(),
+            mods.ctrl,
+            mods.shift,
+            mods.alt,
+        ) {
+            (Key::Character(c), true, false, false) if c == "f" => Action::FindInDocument,
+            (Key::Character(c), false, false, true) if c == "z" => Action::ToggleWordWrap,
+            (Key::Named(NamedKey::F5), false, false, false) => Action::ReloadDocument,
+            (Key::Named(NamedKey::F3), false, shift, false) => {
+                if let Some(doc) = self.ws.docs.get_mut(&id) {
+                    doc.search_step(!shift);
+                    self.window.request_redraw();
+                }
+                return true;
+            }
+            (Key::Character(c), true, _, false) if c == "c" => Action::Copy,
+            _ => return false,
+        };
+        let _ = self.run(config, action);
+        true
     }
 
     /// Starts a shell for `pane` with the given grid size.
@@ -566,6 +764,16 @@ impl Win {
 
     fn close_pane(&mut self, config: &Config, id: PaneId) -> Flow {
         self.renderer.remove_grid(id);
+        if let Some(doc) = self.ws.docs.get(&id) {
+            self.renderer.remove_image(id);
+            if let Some(service) = self.docs.as_mut() {
+                service.close(&doc.path);
+                if service.is_idle() {
+                    // Frees the loader thread, its watcher and the grammars.
+                    self.docs = None;
+                }
+            }
+        }
         self.sessions.remove(&id);
         if self.capture == Some(id) {
             self.capture = None;
@@ -597,6 +805,10 @@ impl Win {
     }
 
     fn update_title(&self) {
+        if let Some(doc) = self.ws.focused_doc() {
+            self.window.set_title(&format!("{} — Mao-Term", doc.name()));
+            return;
+        }
         let title = self
             .ws
             .focused_pane()
@@ -682,10 +894,21 @@ impl Win {
                 }
             }
             Action::Copy => {
-                if let Some(pane) = self.ws.focused_pane() {
+                if let Some(doc) = self.ws.focused_doc() {
+                    if let (Some(text), Some(clipboard)) =
+                        (doc.selected_text(), self.clipboard.as_mut())
+                    {
+                        let _ = clipboard.set_text(text);
+                    }
+                } else if let Some(pane) = self.ws.focused_pane() {
                     pane.copy_selection(self.clipboard.as_mut());
                 }
             }
+            Action::ToggleMarkdownSource
+            | Action::ToggleWordWrap
+            | Action::FindInDocument
+            | Action::ReloadDocument
+            | Action::OpenDocumentExternally => self.doc_action(action),
             Action::CopyOrInterrupt => {
                 if let Some(pane) = self.ws.focused_pane_mut() {
                     if pane.copy_selection(self.clipboard.as_mut()) {
@@ -754,6 +977,42 @@ impl Win {
         Flow::Continue
     }
 
+    /// Runs a document action on the focused document pane (or the active tab's).
+    fn doc_action(&mut self, action: Action) {
+        let id = self
+            .ws
+            .focused_id()
+            .filter(|id| self.ws.docs.contains_key(id))
+            .or_else(|| {
+                self.ws
+                    .active_tab()?
+                    .tree
+                    .panes()
+                    .into_iter()
+                    .find(|id| self.ws.docs.contains_key(id))
+            });
+        let Some(doc) = id.and_then(|id| self.ws.docs.get_mut(&id)) else {
+            return;
+        };
+        match action {
+            Action::ToggleMarkdownSource => doc.toggle_source(),
+            Action::ToggleWordWrap => doc.toggle_wrap(),
+            Action::FindInDocument => doc.start_search(),
+            Action::ReloadDocument => {
+                if let Some(service) = self.docs.as_ref() {
+                    service.reload(&doc.path);
+                }
+            }
+            Action::OpenDocumentExternally => {
+                if let Err(e) = mao_fs::open_with_default_app(&doc.path) {
+                    tracing::warn!("cannot open {}: {e}", doc.path.display());
+                }
+            }
+            _ => {}
+        }
+        self.window.request_redraw();
+    }
+
     fn on_key(&mut self, config: &Config, event: &KeyEvent) -> Flow {
         if event.state != ElementState::Pressed {
             return Flow::Continue;
@@ -773,6 +1032,9 @@ impl Win {
             && input::action_for(event, input::modifiers(self.modifiers)).is_none()
             && self.on_tree_key(config, event)
         {
+            return Flow::Continue;
+        }
+        if self.ws.focused_doc().is_some() && self.on_doc_key(config, event) {
             return Flow::Continue;
         }
         let mods = input::modifiers(self.modifiers);
@@ -1003,6 +1265,7 @@ impl Win {
             | Hit::PaletteRow(_)
             | Hit::Activity(_)
             | Hit::ContextItem(_)
+            | Hit::DocButton(..)
             | Hit::SidebarRow(_) => CursorIcon::Pointer,
             Hit::None | Hit::Palette | Hit::Sidebar | Hit::Context => CursorIcon::Default,
         };
@@ -1045,6 +1308,14 @@ impl Win {
             return;
         }
         let (cell, mods) = (self.cell(), input::modifiers(self.modifiers));
+        if let Some(id) = self.capture
+            && let Some(doc) = self.ws.docs.get_mut(&id)
+        {
+            if doc.drag(pos.x as f32, pos.y as f32) {
+                self.window.request_redraw();
+            }
+            return;
+        }
         if let Some(id) = self.capture {
             if let Some(pane) = self.ws.panes.get_mut(&id)
                 && pane.on_mouse_move(pos, cell, mods)
@@ -1081,12 +1352,24 @@ impl Win {
                     }
                 } else if button == MouseButton::Left {
                     match self.sidebar.files.click(&drag.path, drag.is_dir) {
+                        // A single click previews files; the tree keeps focus.
+                        RowAction::None if !drag.is_dir => {
+                            self.open_document(config, &drag.path, false);
+                            self.sidebar.files.focused = true;
+                        }
                         RowAction::None => {}
                         RowAction::Open(path) => self.file_action(config, FileAction::Open, &path),
                         RowAction::Cd(path) => self.cd_into(config, &path),
                     }
                 }
                 self.window.request_redraw();
+                return Flow::Continue;
+            }
+            if let Some(id) = self.capture
+                && let Some(doc) = self.ws.docs.get_mut(&id)
+            {
+                doc.release();
+                self.capture = None;
                 return Flow::Continue;
             }
             if let Some(id) = self.capture
@@ -1155,6 +1438,46 @@ impl Win {
                 return self.run(config, Action::OpenSettings);
             }
             (Hit::SidebarEdge, MouseButton::Left) => self.sidebar_resize = true,
+            (Hit::DocButton(id, button), MouseButton::Left) => {
+                self.ws.focus(id);
+                self.update_title();
+                let action = match button {
+                    DocButton::Source => Action::ToggleMarkdownSource,
+                    DocButton::Wrap => Action::ToggleWordWrap,
+                    DocButton::External => Action::OpenDocumentExternally,
+                    DocButton::Fit => {
+                        if let Some(doc) = self.ws.docs.get_mut(&id) {
+                            if doc.zoom.is_none() {
+                                doc.zoom_actual();
+                            } else {
+                                doc.zoom_fit();
+                            }
+                        }
+                        self.window.request_redraw();
+                        return Flow::Continue;
+                    }
+                };
+                self.doc_action(action);
+            }
+            (Hit::Pane(id), _) if self.ws.docs.contains_key(&id) => {
+                self.sidebar.files.focused = false;
+                if self.ws.focused_id() != Some(id) {
+                    self.ws.focus(id);
+                    self.update_title();
+                }
+                let shift = self.modifiers.shift_key();
+                let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
+                if let Some(doc) = self.ws.docs.get_mut(&id)
+                    && button == MouseButton::Left
+                    && doc.body.contains(x, y)
+                {
+                    doc.press(x, y, shift);
+                    if doc.has_capture() {
+                        self.capture = Some(id);
+                    }
+                }
+                self.window.request_redraw();
+            }
             (Hit::SidebarRow(i), MouseButton::Left | MouseButton::Right) => {
                 let rows = self.sidebar.files.row_paths();
                 if let Some((path, is_dir)) = rows.get(i).cloned() {
@@ -1227,6 +1550,29 @@ impl Win {
             self.window.request_redraw();
             return;
         }
+        if let Hit::Pane(id) | Hit::DocButton(id, _) = hit
+            && let Some(doc) = self.ws.docs.get_mut(&id)
+        {
+            let lines = match delta {
+                winit::event::MouseScrollDelta::LineDelta(x, y) => (x, y),
+                winit::event::MouseScrollDelta::PixelDelta(p) => {
+                    (p.x as f32 / cell.height, p.y as f32 / cell.height)
+                }
+            };
+            if doc.image().is_some() {
+                if lines.1 != 0.0 {
+                    let factor = 1.15f32.powf(lines.1);
+                    doc.zoom_by(factor);
+                }
+            } else if mods.shift || lines.0 != 0.0 {
+                let dx = if lines.0 != 0.0 { -lines.0 } else { -lines.1 };
+                doc.scroll_columns((dx * 6.0).round() as isize);
+            } else {
+                doc.scroll_by((-lines.1 * 3.0).round() as isize);
+            }
+            self.window.request_redraw();
+            return;
+        }
         if let Hit::Pane(id) = hit
             && let Some(pane) = self.ws.panes.get_mut(&id)
             && pane.on_wheel(delta, pos, cell, mods)
@@ -1279,6 +1625,12 @@ impl Win {
                 }
             }
             TerminalEvent::Exited(code) => pane.on_shell_exit(code),
+            TerminalEvent::Shell(mao_terminal::ShellEvent::Open(path)) => {
+                tracing::debug!(path = %path.display(), "mao open");
+                // Opened by the caller, which has the config.
+                self.pending_open = Some(path);
+                self.window.request_redraw();
+            }
             TerminalEvent::Shell(event) => {
                 tracing::trace!(pane = pane_id, ?event, "shell event");
                 pane.on_shell_event(event);
@@ -1295,7 +1647,18 @@ impl Win {
         let editor_enabled = self.editor_enabled;
         if let Some(tab) = self.ws.active_tab() {
             let focused_pane = tab.focused;
+            self.images.clear();
             for (id, _) in tab.layout(self.layout.content, self.metrics.gap) {
+                if let Some(doc) = self.ws.docs.get_mut(&id) {
+                    doc.upload_image(&mut self.renderer);
+                    if let Some(draw) = doc.image_draw() {
+                        self.images.push(draw);
+                    } else {
+                        doc.render(&mut self.renderer, &self.doc_colors, &mut self.row_buf);
+                        self.visible.push(id);
+                    }
+                    continue;
+                }
                 self.visible.push(id);
                 let Some(pane) = self.ws.panes.get_mut(&id) else {
                     continue;
@@ -1408,7 +1771,8 @@ impl Win {
                     .map(|l| (l, self.cursor.x as f32, self.cursor.y as f32)),
             },
         );
-        self.renderer.render(background, &self.visible, &self.ui)
+        self.renderer
+            .render(background, &self.visible, &self.images, &self.ui)
     }
 }
 
@@ -1419,6 +1783,10 @@ impl ApplicationHandler<UserEvent> for App {
         }
         match self.create_window(event_loop) {
             Ok(mut win) => {
+                // Testing aid: open this file in a document pane at startup.
+                if let Ok(path) = std::env::var("MAO_DEBUG_OPEN") {
+                    win.open_document(&self.config, std::path::Path::new(&path), true);
+                }
                 // Testing aid: run actions by palette name at startup, separated by `|`
                 // (e.g. `MAO_DEBUG_ACTIONS="Split Pane Right|New Tab"`).
                 if let Ok(list) = std::env::var("MAO_DEBUG_ACTIONS") {
@@ -1453,11 +1821,17 @@ impl ApplicationHandler<UserEvent> for App {
                 pane,
                 session,
                 event,
-            } => w.on_terminal_event(pane, session, event),
+            } => {
+                w.on_terminal_event(pane, session, event);
+                if let Some(path) = w.pending_open.take() {
+                    w.open_document(&self.config, &path, false);
+                }
+            }
             UserEvent::Fs(event) => {
                 w.sidebar.files.on_event(event);
                 w.window.request_redraw();
             }
+            UserEvent::Doc(doc) => w.on_document(doc),
             UserEvent::Executables(names) => {
                 tracing::debug!(count = names.len(), "PATH executables scanned");
                 w.engine.set_executables(names);
@@ -1568,6 +1942,37 @@ fn spawn_terminal(
         },
     )?;
     Ok(terminal)
+}
+
+/// Document colors from the terminal theme.
+fn doc_theme(t: &mao_config::ThemeConfig) -> mao_docs::Theme {
+    let (bg, fg) = (t.background.to_array(), t.foreground.to_array());
+    let luma =
+        |c: [u8; 3]| 0.299 * f32::from(c[0]) + 0.587 * f32::from(c[1]) + 0.114 * f32::from(c[2]);
+    mao_docs::Theme {
+        fg,
+        bg,
+        muted: chrome::mix(fg, bg, 0.5),
+        accent: t.cursor.to_array(),
+        heading: t.ansi[12].to_array(),
+        link: t.ansi[14].to_array(),
+        code_fg: t.ansi[11].to_array(),
+        code_bg: chrome::mix(bg, fg, 0.07),
+        dark: luma(bg) < 128.0,
+    }
+}
+
+fn doc_colors(t: &mao_config::ThemeConfig) -> DocColors {
+    let (bg, fg) = (t.background.to_array(), t.foreground.to_array());
+    let yellow = t.ansi[3].to_array();
+    DocColors {
+        fg,
+        bg,
+        muted: chrome::mix(fg, bg, 0.55),
+        selection: t.selection.to_array(),
+        matched: chrome::mix(bg, yellow, 0.35),
+        current: chrome::mix(bg, yellow, 0.7),
+    }
 }
 
 fn to_grid_cell(c: &mao_terminal::CellView) -> mao_render::GridCell {

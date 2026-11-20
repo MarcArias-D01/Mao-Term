@@ -13,6 +13,7 @@ publish = false
 # internal (add crates here as they gain real dependents)
 mao-complete = { path = "crates/mao-complete" }
 mao-config = { path = "crates/mao-config" }
+mao-docs = { path = "crates/mao-docs" }
 mao-fs = { path = "crates/mao-fs" }
 mao-input = { path = "crates/mao-input" }
 mao-render = { path = "crates/mao-render" }

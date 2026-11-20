@@ -31,7 +31,7 @@ crates/
   mao-input/      native line editor (buffer, cursor, selection, history)
   mao-complete/   autocomplete engine: shell tokenizer + suggestion sources
   mao-fs/         lazy file tree + watcher
-  mao-docs/       document loading/parsing for the viewer
+  mao-docs/       document loading/parsing for the viewer (Markdown, syntect, images)
   mao-agents/     AI agent session detection
   mao-sysmon/     system metrics sampling
   mao-config/     config, themes, keybindings, per-OS paths

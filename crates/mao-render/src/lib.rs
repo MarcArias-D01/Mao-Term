@@ -5,6 +5,7 @@
 
 mod color;
 mod grid;
+mod image;
 mod quad;
 mod ui;
 
@@ -14,12 +15,14 @@ use glyphon::{Cache, FontSystem, Resolution, SwashCache, TextAtlas, TextRenderer
 
 pub use color::srgb_to_linear;
 pub use grid::{CellMetrics, CellStyle, Cursor, CursorShape, FontLoader, GridCell, Rgb8};
+pub use image::{ImageData, ImageDraw, ImageId};
 pub use ui::{Align, UiFrame, UiRect, UiText};
 
 /// Identifies a terminal grid (one per pane).
 pub type GridId = u64;
 
 use grid::{Font, Grid};
+use image::ImagePipeline;
 use quad::QuadPipeline;
 use ui::UiLayer;
 
@@ -102,6 +105,7 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     srgb: bool,
     quads: QuadPipeline,
+    images: ImagePipeline,
     text: Text,
     font: Font,
     grids: HashMap<GridId, Grid>,
@@ -200,6 +204,7 @@ impl Renderer {
         );
 
         let quads = QuadPipeline::new(&device, config.format);
+        let images = ImagePipeline::new(&device, config.format);
 
         let t = std::time::Instant::now();
         let mut font_system = fonts.finish();
@@ -229,6 +234,7 @@ impl Renderer {
             queue,
             config,
             quads,
+            images,
             text: Text {
                 font_system,
                 swash: SwashCache::new(),
@@ -311,6 +317,21 @@ impl Renderer {
         }
     }
 
+    /// Largest image side the GPU accepts.
+    pub fn max_texture_size(&self) -> u32 {
+        self.device.limits().max_texture_dimension_2d
+    }
+
+    /// Uploads (or replaces) image `id` from its mipmap chain (level 0 first).
+    pub fn set_image(&mut self, id: ImageId, levels: &[ImageData<'_>]) {
+        self.images.upload(&self.device, &self.queue, id, levels);
+    }
+
+    /// Frees image `id`'s GPU memory.
+    pub fn remove_image(&mut self, id: ImageId) {
+        self.images.remove(id);
+    }
+
     /// Replaces the contents of one row of grid `id`.
     pub fn set_row(&mut self, id: GridId, row: usize, cells: impl IntoIterator<Item = GridCell>) {
         if let Some(grid) = self.grids.get_mut(&id) {
@@ -325,11 +346,12 @@ impl Renderer {
     }
 
     /// Renders one frame: `background` (sRGB) clear, then the listed grids,
-    /// then the UI layer on top.
+    /// then the images, then the UI layer on top.
     pub fn render(
         &mut self,
         background: Rgb8,
         visible_grids: &[GridId],
+        images: &[ImageDraw],
         ui: &UiFrame,
     ) -> Result<FrameOutcome, RenderError> {
         let frame = match self.surface.get_current_texture() {
@@ -396,6 +418,8 @@ impl Renderer {
         let all_quads = (self.instances.len() / quad::FLOATS_PER_QUAD) as u32;
         self.quads
             .prepare(&self.device, &self.queue, (width, height), &self.instances);
+        self.images
+            .prepare(&self.device, &self.queue, (width, height), images);
 
         viewport.update(&self.queue, Resolution { width, height });
         let grids = &self.grids;
@@ -470,6 +494,7 @@ impl Renderer {
             if let Err(e) = renderer.render(atlas, viewport, &mut pass) {
                 tracing::error!("grid text render failed: {e}");
             }
+            self.images.draw(&mut pass, (width, height), images);
             self.quads.draw(&mut pass, grid_quads..top_quads);
             if let Err(e) = ui_renderer.render(atlas, viewport, &mut pass) {
                 tracing::error!("UI text render failed: {e}");

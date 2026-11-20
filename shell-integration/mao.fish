@@ -1,5 +1,6 @@
 # Mao-Term shell integration for fish. Loaded with `fish --init-command 'source <this file>'`.
-# Emits OSC 133 (prompt / command marks) and OSC 7 (current directory).
+# Emits OSC 133 (prompt / command marks) and OSC 7 (current directory),
+# and defines `mao open <file>` (OSC 7770) to show a file in Mao-Term's viewer.
 # See docs/specs/shell-integration.md. Status: untested on Linux.
 
 if set -q __mao_term
@@ -26,4 +27,14 @@ if functions -q fish_prompt
         __mao_user_prompt
         printf '\e]133;B\a'
     end
+end
+
+# `mao open <file>`: show a file in Mao-Term's document viewer.
+function mao
+    if test (count $argv) -lt 2; or test "$argv[1]" != open
+        echo 'usage: mao open <file>'
+        return 2
+    end
+    set -l full (realpath -- $argv[2]); or return 1
+    printf '\e]7770;open;file://%s%s\a' (hostname) (string escape --style=url -- $full)
 end

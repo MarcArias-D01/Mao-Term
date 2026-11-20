@@ -18,7 +18,7 @@ See the files of the directory you are in (in the focused terminal) in the sideb
 - Live updates (create/delete/rename) with watchers only on expanded folders.
 - Quick filter by typing with the sidebar focused.
 - **Actions**:
-  - Click a file → open in the document viewer (new or reused pane).
+  - Click a file → preview in the document viewer (reused pane, tree keeps focus); double click / `Enter` → open it.
   - Double-click a folder / `Enter` → `cd` in the focused terminal (if at the prompt).
   - Drag onto the terminal → inserts the path (quoted per shell).
   - Context menu: copy path (absolute/relative), open in new terminal, reveal in OS file explorer, open with default app.

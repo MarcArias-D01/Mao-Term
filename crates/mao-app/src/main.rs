@@ -4,6 +4,7 @@
 mod actions;
 mod app;
 mod chrome;
+mod docpane;
 mod editor;
 mod input;
 mod overlay;

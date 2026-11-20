@@ -113,6 +113,8 @@ impl Pane {
             ShellEvent::CommandStart => self.shell = ShellState::Running,
             ShellEvent::CommandEnd(code) => self.last_exit = code,
             ShellEvent::Cwd(path) => self.cwd = Some(path),
+            // Handled by the app (opens a document pane).
+            ShellEvent::Open(_) => {}
         }
     }
 

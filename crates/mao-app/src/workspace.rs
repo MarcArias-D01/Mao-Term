@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use mao_ui::{PaneId, Rect, SplitTree};
 
+use crate::docpane::DocPane;
 use crate::pane::Pane;
 
 pub struct Tab {
@@ -39,7 +40,10 @@ pub enum Closed {
 pub struct Workspace {
     pub tabs: Vec<Tab>,
     pub active: usize,
+    /// Terminal panes.
     pub panes: HashMap<PaneId, Pane>,
+    /// Document panes (share the split trees with terminals).
+    pub docs: HashMap<PaneId, DocPane>,
     next_id: u64,
 }
 
@@ -69,6 +73,20 @@ impl Workspace {
     pub fn focused_pane_mut(&mut self) -> Option<&mut Pane> {
         let id = self.focused_id()?;
         self.panes.get_mut(&id)
+    }
+
+    pub fn focused_doc(&self) -> Option<&DocPane> {
+        self.docs.get(&self.focused_id()?)
+    }
+
+    /// Short name of a pane, for tab titles.
+    pub fn pane_name(&self, id: PaneId) -> String {
+        if let Some(d) = self.docs.get(&id) {
+            return d.name();
+        }
+        self.panes
+            .get(&id)
+            .map_or_else(|| "shell".to_owned(), Pane::display_name)
     }
 
     pub fn tab_of(&self, pane: PaneId) -> Option<usize> {
@@ -102,6 +120,9 @@ impl Workspace {
             if let Some(p) = self.panes.get_mut(&id) {
                 p.full_redraw = true;
             }
+            if let Some(d) = self.docs.get_mut(&id) {
+                d.dirty = true;
+            }
         }
     }
 
@@ -119,6 +140,7 @@ impl Workspace {
             return Closed::Pane;
         };
         self.panes.remove(&pane);
+        self.docs.remove(&pane);
         let tab = &mut self.tabs[index];
         if tab.tree.remove(pane) {
             if tab.zoomed == Some(pane) {
@@ -130,6 +152,9 @@ impl Workspace {
             for id in tab.tree.panes() {
                 if let Some(p) = self.panes.get_mut(&id) {
                     p.full_redraw = true;
+                }
+                if let Some(d) = self.docs.get_mut(&id) {
+                    d.dirty = true;
                 }
             }
             return Closed::Pane;

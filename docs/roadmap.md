@@ -29,7 +29,8 @@ Cold start (first launch after build) ~300–500 ms due to driver shader caches.
 - ✅ Measure performance budgets (see below).
 - ✅ Mouse reporting to applications (normal + SGR 1006: clicks, drag/motion, wheel; Shift bypasses it for selection) and focus reporting.
 - ⬜ Search in buffer (`Ctrl+Shift+F`), URL detection and OSC 8 hyperlinks.
-- ⬜ Color emoji (renders blank today) and combining characters (dropped today).
+- ✅ Wide glyphs: text after a wide glyph (emoji, CJK) is anchored to the right column (fixed in M5).
+- ⬜ Emoji with variation selectors (`🗂️` is measured 1 cell, drawn 2) and combining characters (dropped today).
 - ✅ Shell exit: shows the exit code; Enter restarts the shell, Esc closes the window.
 - ✅ Recover from GPU surface loss by recreating the surface (implemented; not exercised yet — hard to trigger on demand).
 - ⬜ Verify on Linux (X11 + Wayland).
@@ -74,16 +75,25 @@ Next steps for startup: create the GPU device in parallel with window creation a
 - ✅ Activity bar (Files, Agents, Monitor, Settings; Segoe Fluent/MDL2 icons with plain fallbacks) and collapsible, resizable sidebar (`Ctrl+Shift+B`, `Ctrl+Shift+1/2/3`).
 - ✅ `mao-fs`: listing on a worker thread, `.gitignore`-aware (toggle from the palette), natural sort, watchers only on visible folders with debounced re-listing. Closed sidebar = no threads, no watchers (measured: idle CPU 0%, +2 threads only while open).
 - ✅ Tree follows the focused pane's cwd; lazy expansion, keyboard navigation (arrows, Enter, `Ctrl+Enter` = cd/insert path, type-ahead), mouse wheel, scrollbar.
-- ✅ Actions: double click (open with default app / `cd` into folder), drag onto a terminal inserts the path (relative to the shell's folder when possible), context menu (open, cd here, open in new tab, insert/copy path, copy relative path, reveal in file explorer).
+- ✅ Actions: click previews a file in the document viewer, double click opens it (folders: `cd`), drag onto a terminal inserts the path (relative to the shell's folder when possible), context menu (open, open with default app, cd here, open in new tab, insert/copy path, copy relative path, reveal in file explorer).
 - ✅ Settings button / `Ctrl+,` opens the config file (created from a commented template).
 - ✅ UI top layer so menus and popups cover the text below them.
 - ⬜ Per-file git status, file-type icons, "pin root" / repo-root option, filter-as-you-type (today: type-ahead jump), persist sidebar width.
-- ⬜ Open files in the document viewer (M5; today: default app).
+- ✅ Open files in the document viewer (M5).
 
-## M5 — Document viewer ⬜
+## M5 — Document viewer 🟨
 
-- ⬜ Document pane type.
-- ⬜ Rendered Markdown, highlighted code, images, SVG, JSON/TOML/YAML.
+- ✅ `mao-docs`: background loader + watcher (auto-reload, log tail), type detection, binary detection, UTF-16, 64 MB cap.
+- ✅ Document pane in the split tree (reused per tab), header with kind/size/lines and Source/Wrap/Fit/Open buttons, title and status bar info.
+- ✅ Markdown rendered on the cell grid (headings, emphasis, lists, task lists, quotes, box-drawn tables, highlighted code blocks) + source view ([ADR 0004](decisions/0004-document-viewer.md)).
+- ✅ Code/text/JSON/TOML/YAML/logs highlighted with syntect + bat grammars; line numbers; wrap toggle; plain text first, highlighting after (first screen ~2 ms; 10 MB log in 128 ms).
+- ✅ Images (png/jpg/gif/webp/bmp/ico) and SVG (resvg) on a new mipmapped textured-quad pipeline: fit, zoom, pan.
+- ✅ Search (`Ctrl+F`, all matches highlighted), mouse selection, copy, keyboard scrolling.
+- ✅ `mao open <file>` in pwsh/bash/zsh/fish via OSC 7770 (ConPTY passes it through); opens from the file tree (click = preview).
+- ✅ Idle CPU 0% with documents open; grammars (~50 MB) freed when the last document closes.
+- ⬜ Palette `Open File…` / quick open, Ctrl+click on paths in terminal output.
+- ⬜ Huge files (> 64 MB) by chunks/mmap; lazy highlighting of the visible part only.
+- ⬜ Inline images in Markdown, clickable links, JSON folding, animated GIFs.
 
 ## M6 — Agents + monitor ⬜
 

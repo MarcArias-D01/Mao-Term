@@ -19,7 +19,7 @@
 | [shell-integration](specs/shell-integration.md) | M3 | In progress |
 | [input-autocomplete](specs/input-autocomplete.md) | M3 | In progress |
 | [file-tree](specs/file-tree.md) | M4 | In progress |
-| [document-viewer](specs/document-viewer.md) | M5 | Draft |
+| [document-viewer](specs/document-viewer.md) | M5 | In progress |
 | [agents-panel](specs/agents-panel.md) | M6 | Draft |
 | [system-monitor](specs/system-monitor.md) | M6 | Draft |
 | [config-theming](specs/config-theming.md) | M0–M7 | Draft |
@@ -31,5 +31,6 @@
 | [0001](decisions/0001-render-stack.md) | Stack: winit + wgpu + glyphon + alacritty_terminal | Accepted |
 | [0002](decisions/0002-native-input-editor.md) | Native input editor for autocomplete | Accepted |
 | [0003](decisions/0003-portable-agent-docs.md) | AGENTS.md and skills in docs/, portable across agents | Accepted |
+| [0004](decisions/0004-document-viewer.md) | Document viewer: cell grid rendering, syntect, `mao open` over OSC | Accepted |
 
 Spec statuses: `Draft` → `Approved` → `In progress` → `Done`.

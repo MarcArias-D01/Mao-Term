@@ -1,5 +1,6 @@
 //! Incremental scanner for the shell-integration OSC sequences that
-//! `alacritty_terminal` ignores: OSC 133 (prompt/command marks) and OSC 7 (cwd).
+//! `alacritty_terminal` ignores: OSC 133 (prompt/command marks), OSC 7 (cwd)
+//! and Mao-Term's own OSC 7770 (`mao open <file>`).
 //! See `docs/specs/shell-integration.md`.
 //!
 //! Runs on the PTY I/O thread over every byte read, so the common path (no ESC
@@ -20,6 +21,8 @@ pub enum ShellEvent {
     CommandEnd(Option<i32>),
     /// `OSC 7;file://host/path` — current directory.
     Cwd(PathBuf),
+    /// `OSC 7770;open;file://host/path` — show a file in the document viewer.
+    Open(PathBuf),
 }
 
 /// Longest OSC payload we keep; longer ones are not ours and are skipped.
@@ -144,6 +147,10 @@ fn parse(payload: &[u8]) -> Option<ShellEvent> {
             }
         }
         "7" => parse_file_url(rest).map(ShellEvent::Cwd),
+        "7770" => match rest.split_once(';')? {
+            ("open", url) => parse_file_url(url).map(ShellEvent::Open),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -261,6 +268,18 @@ mod tests {
             PathBuf::from("/C:/Users/Marc A/dev")
         };
         assert_eq!(ev, vec![ShellEvent::Cwd(expected)]);
+    }
+
+    #[test]
+    fn open_request() {
+        let ev = scan(&[b"\x1b]7770;open;file://localhost/tmp/a%20b.md\x07"]);
+        let expected = if cfg!(windows) {
+            PathBuf::from(r"\tmp\a b.md")
+        } else {
+            PathBuf::from("/tmp/a b.md")
+        };
+        assert_eq!(ev, vec![ShellEvent::Open(expected)]);
+        assert!(scan(&[b"\x1b]7770;close;file:///x\x07"]).is_empty());
     }
 
     #[test]

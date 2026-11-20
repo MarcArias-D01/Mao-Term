@@ -1,5 +1,6 @@
 [package]
 name = "mao-docs"
+description = "Document loading and layout for Mao-Term's viewer (Markdown, code, images)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,6 +8,14 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+notify = "8.2"
+pulldown-cmark = { version = "0.13", default-features = false }
+resvg = "0.50"
+syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
+tracing.workspace = true
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
+unicode-width = "0.2"
 
 [lints]
 workspace = true

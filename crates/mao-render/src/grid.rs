@@ -376,6 +376,11 @@ impl Grid {
             let base = font.attrs();
             let mut col = 0;
             while col < row.cells.len() {
+                // A segment never starts on the second half of a wide glyph
+                // (it would anchor the following text one column too far left).
+                while row.cells.get(col).is_some_and(|c| c.style.spacer) {
+                    col += 1;
+                }
                 let seg_start = col;
                 self.text.clear();
                 self.spans.clear();

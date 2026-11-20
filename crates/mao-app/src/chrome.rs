@@ -6,6 +6,7 @@ use mao_config::ThemeConfig;
 use mao_render::{Align, Rgb8, UiFrame, UiText};
 use mao_ui::{Divider, PaneId, Rect};
 
+use crate::docpane::{DocButton, DocPane};
 use crate::editor::{MENU_ROWS, Menu};
 use crate::palette::{MAX_VISIBLE, Palette};
 use crate::sidebar::{Panel, Sidebar};
@@ -168,7 +169,9 @@ impl Layout {
 /// Something to do with a file or folder from the context menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileAction {
+    /// In the document viewer.
     Open,
+    OpenExternally,
     Cd,
     OpenInNewTab,
     InsertPath,
@@ -181,6 +184,7 @@ impl FileAction {
     fn label(self) -> &'static str {
         match self {
             Self::Open => "Open",
+            Self::OpenExternally => "Open with Default App",
             Self::Cd => "cd Here",
             Self::OpenInNewTab => "Open in New Tab",
             Self::InsertPath => "Insert Path in Terminal",
@@ -219,7 +223,14 @@ impl ContextMenu {
                 Reveal,
             ]
         } else {
-            vec![Open, InsertPath, CopyPath, CopyRelativePath, Reveal]
+            vec![
+                Open,
+                OpenExternally,
+                InsertPath,
+                CopyPath,
+                CopyRelativePath,
+                Reveal,
+            ]
         };
         Self {
             x,
@@ -271,6 +282,8 @@ pub enum Hit {
     ContextItem(usize),
     /// Inside the context menu but not on an item.
     Context,
+    /// A button in a document pane's header.
+    DocButton(PaneId, DocButton),
 }
 
 /// What hit-testing needs to know about the window.
@@ -361,10 +374,32 @@ pub fn hit_test(x: f32, y: f32, scene: &Scene<'_>) -> Hit {
             }
         }
     }
-    tab.layout(layout.content, m.gap)
+    let Some(id) = tab
+        .layout(layout.content, m.gap)
         .into_iter()
         .find(|(_, r)| r.contains(x, y))
-        .map_or(Hit::None, |(id, _)| Hit::Pane(id))
+        .map(|(id, _)| id)
+    else {
+        return Hit::None;
+    };
+    if let Some(doc) = ws.docs.get(&id)
+        && doc.header.contains(x, y)
+    {
+        return doc_buttons(doc, m)
+            .into_iter()
+            .find(|(_, r, _, _)| r.contains(x, y))
+            .map_or(Hit::Pane(id), |(b, ..)| Hit::DocButton(id, b));
+    }
+    Hit::Pane(id)
+}
+
+/// Height of a document pane's header bar.
+pub fn doc_header(m: &Metrics) -> f32 {
+    m.px(30.0)
+}
+
+fn doc_buttons(doc: &DocPane, m: &Metrics) -> Vec<(DocButton, Rect, &'static str, bool)> {
+    doc.buttons(|v| m.px(v), m.ui_text * 0.92)
 }
 
 /// Colors derived from the terminal theme.
@@ -403,7 +438,7 @@ impl Colors {
     }
 }
 
-fn mix(a: Rgb8, b: Rgb8, t: f32) -> Rgb8 {
+pub fn mix(a: Rgb8, b: Rgb8, t: f32) -> Rgb8 {
     let m = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
     [m(a[0], b[0]), m(a[1], b[1]), m(a[2], b[2])]
 }
@@ -426,6 +461,7 @@ const KEY_TREE_CHEVRON: u64 = 14 << 48;
 const KEY_TREE_ICON: u64 = 15 << 48;
 const KEY_CONTEXT: u64 = 16 << 48;
 const KEY_DRAG: u64 = 17 << 48;
+const KEY_DOC: u64 = 18 << 48;
 
 /// Icon glyphs: Segoe Fluent/MDL2 code points, or plain fallbacks.
 struct Icons {
@@ -496,6 +532,7 @@ pub fn draw(ui: &mut UiFrame, s: &DrawState<'_>) {
         draw_sidebar(ui, s, r);
     }
     draw_tab_bar(ui, s);
+    draw_docs(ui, s);
     draw_panes_decor(ui, s);
     draw_status(ui, s);
     // Floating things go on the top layer so they cover the text below them.
@@ -806,10 +843,7 @@ fn draw_tab_bar(ui: &mut UiFrame, s: &DrawState<'_>) {
             );
         }
 
-        let title = ws
-            .panes
-            .get(&tab.focused)
-            .map_or_else(|| "shell".to_owned(), |p| p.display_name());
+        let title = ws.pane_name(tab.focused);
         let pad = m.px(14.0);
         let mut text_x = r.x + pad;
         if tab.activity && !active {
@@ -873,6 +907,108 @@ fn draw_tab_bar(ui: &mut UiFrame, s: &DrawState<'_>) {
     ));
 }
 
+/// Document panes: header (name, info, buttons, search box) and messages.
+fn draw_docs(ui: &mut UiFrame, s: &DrawState<'_>) {
+    let (l, m, c, ws) = (s.layout, s.metrics, s.colors, s.workspace);
+    let Some(tab) = ws.active_tab() else {
+        return;
+    };
+    for (id, _) in tab.layout(l.content, m.gap) {
+        let Some(doc) = ws.docs.get(&id) else {
+            continue;
+        };
+        let key = |slot: u64| KEY_DOC | (id << 8) | slot;
+        let h = doc.header;
+        ui.rect(h.x, h.y, h.w, h.h, c.raised);
+        ui.rect(h.x, h.bottom() - m.gap, h.w, m.gap, c.divider);
+        let pad = m.px(10.0);
+        let size = m.ui_text * 0.92;
+        let buttons = doc_buttons(doc, m);
+        let buttons_x = buttons.first().map_or(h.right() - pad, |(_, r, ..)| r.x);
+
+        // File name, then either the info line or the search box.
+        let name = doc.name();
+        let name_w = (name.chars().count() as f32 * m.ui_text * 0.6 + pad).min(h.w * 0.45);
+        let mut t = text(
+            key(0),
+            name,
+            Rect::new(h.x + pad, h.y, name_w, h.h),
+            m.ui_text,
+            c.fg,
+            Align::Left,
+        );
+        t.bold = true;
+        ui.texts.push(t);
+        let info_x = h.x + pad + name_w + m.px(8.0);
+        let info_w = (buttons_x - info_x - m.px(8.0)).max(0.0);
+        if let Some(search) = &doc.search {
+            let r = Rect::new(info_x, h.y + m.px(4.0), info_w, h.h - m.px(8.0));
+            ui.rect(r.x, r.y, r.w, r.h, c.bg);
+            ui.rect(r.x, r.bottom() - m.px(2.0), r.w, m.px(2.0), c.accent);
+            let status = doc.search_status().unwrap_or_default();
+            ui.texts.push(text(
+                key(1),
+                format!("Find: {}", search.query),
+                r.inset(m.px(6.0)),
+                size,
+                c.fg,
+                Align::Left,
+            ));
+            ui.texts.push(text(
+                key(2),
+                status,
+                r.inset(m.px(6.0)),
+                size,
+                c.dim,
+                Align::Right,
+            ));
+        } else {
+            ui.texts.push(text(
+                key(1),
+                doc.info(),
+                Rect::new(info_x, h.y, info_w, h.h),
+                size,
+                c.dim,
+                Align::Left,
+            ));
+        }
+
+        for (i, (b, r, label, on)) in buttons.iter().enumerate() {
+            let hovered = *s.hover == Hit::DocButton(id, *b);
+            if hovered {
+                ui.rect(r.x, r.y, r.w, r.h, c.hover);
+            } else if *on {
+                ui.rect(r.x, r.y, r.w, r.h, c.bg);
+            }
+            ui.texts.push(text(
+                key(8 + i as u64),
+                *label,
+                *r,
+                size,
+                if *on { c.accent } else { c.fg },
+                Align::Center,
+            ));
+        }
+
+        // Loading / can't show.
+        let message = match (&doc.doc, doc.message()) {
+            (None, _) => Some("Loading…"),
+            (_, Some(msg)) => Some(msg),
+            _ => None,
+        };
+        if let Some(msg) = message {
+            ui.texts.push(text(
+                key(3),
+                msg,
+                doc.body.inset(m.px(16.0)),
+                m.ui_text,
+                c.dim,
+                Align::Center,
+            ));
+        }
+    }
+}
+
 fn draw_panes_decor(ui: &mut UiFrame, s: &DrawState<'_>) {
     let (l, m, c) = (s.layout, s.metrics, s.colors);
     let Some(tab) = s.workspace.active_tab() else {
@@ -911,16 +1047,21 @@ fn draw_status(ui: &mut UiFrame, s: &DrawState<'_>) {
     let inner = Rect::new(r.x + pad, r.y, (r.w - 2.0 * pad).max(0.0), r.h);
     let size = m.ui_text * 0.92;
 
-    let left = ws.focused_pane().map_or(String::new(), |p| {
-        let place = p
-            .cwd
-            .as_ref()
-            .map_or_else(|| p.title.clone(), |c| c.display().to_string());
-        match p.last_exit {
-            Some(code) if code != 0 => format!("{place}   ✗ exit {code}"),
-            _ => place,
-        }
-    });
+    let doc = ws.focused_doc();
+    let left = if let Some(d) = doc {
+        d.path.display().to_string()
+    } else {
+        ws.focused_pane().map_or(String::new(), |p| {
+            let place = p
+                .cwd
+                .as_ref()
+                .map_or_else(|| p.title.clone(), |c| c.display().to_string());
+            match p.last_exit {
+                Some(code) if code != 0 => format!("{place}   ✗ exit {code}"),
+                _ => place,
+            }
+        })
+    };
     ui.texts.push(text(
         KEY_STATUS,
         left,
@@ -931,6 +1072,32 @@ fn draw_status(ui: &mut UiFrame, s: &DrawState<'_>) {
     ));
 
     let right = match (ws.active_tab(), ws.focused_pane()) {
+        (Some(tab), _) if doc.is_some() => {
+            let d = doc.map_or(String::new(), |d| {
+                let total = d.total_rows();
+                if total == 0 {
+                    return String::new();
+                }
+                let pct = if d.max_scroll() == 0 {
+                    100
+                } else {
+                    d.scroll * 100 / d.max_scroll()
+                };
+                format!("  ·  row {}/{}  ({pct}%)", d.scroll + 1, total)
+            });
+            format!(
+                "tab {}/{}  ·  pane {}/{}{d}",
+                ws.active + 1,
+                ws.tabs.len(),
+                tab.tree
+                    .panes()
+                    .iter()
+                    .position(|&id| id == tab.focused)
+                    .unwrap_or(0)
+                    + 1,
+                tab.tree.len()
+            )
+        }
         (Some(tab), Some(pane)) => {
             let grid = pane.terminal.size();
             let panes = tab.tree.len();

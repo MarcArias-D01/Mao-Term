@@ -1,5 +1,6 @@
 # Mao-Term shell integration for zsh (loaded via ZDOTDIR).
-# Emits OSC 133 (prompt / command marks) and OSC 7 (current directory).
+# Emits OSC 133 (prompt / command marks) and OSC 7 (current directory),
+# and defines `mao open <file>` (OSC 7770) to show a file in Mao-Term's viewer.
 # See docs/specs/shell-integration.md. Status: untested on Linux.
 
 # Restore the user's ZDOTDIR and load their config.
@@ -37,6 +38,13 @@ if [[ -z "${__MAO_TERM-}" ]]; then
     }
 
     __mao_preexec() { printf '\e]133;C\a'; }
+
+    # `mao open <file>`: show a file in Mao-Term's document viewer.
+    mao() {
+        if [[ "${1-}" != open || -z "${2-}" ]]; then print 'usage: mao open <file>'; return 2; fi
+        if [[ ! -e "$2" ]]; then print -u2 "mao: no such file: $2"; return 1; fi
+        printf '\e]7770;open;file://%s%s\a' "$HOST" "$(__mao_urlencode "${2:A}")"
+    }
 
     precmd_functions=(__mao_precmd $precmd_functions __mao_wrap_prompt)
     preexec_functions+=(__mao_preexec)

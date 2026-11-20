@@ -35,6 +35,12 @@ pub enum Action {
     ToggleIgnoredFiles,
     CollapseFolders,
     OpenSettings,
+    /// Document panes.
+    ToggleMarkdownSource,
+    ToggleWordWrap,
+    FindInDocument,
+    ReloadDocument,
+    OpenDocumentExternally,
     Quit,
 }
 
@@ -73,6 +79,11 @@ impl Action {
             Self::ToggleIgnoredFiles => "Toggle Ignored Files in Explorer",
             Self::CollapseFolders => "Collapse Folders in Explorer",
             Self::OpenSettings => "Open Settings File",
+            Self::ToggleMarkdownSource => "Toggle Markdown Source",
+            Self::ToggleWordWrap => "Toggle Word Wrap",
+            Self::FindInDocument => "Find in Document",
+            Self::ReloadDocument => "Reload Document",
+            Self::OpenDocumentExternally => "Open Document in Default App",
             Self::Quit => "Quit Mao-Term",
         }
     }
@@ -108,7 +119,15 @@ impl Action {
             Self::ShowPanel(Panel::Agents) => "Ctrl+Shift+2",
             Self::ShowPanel(Panel::Monitor) => "Ctrl+Shift+3",
             Self::OpenSettings => "Ctrl+,",
-            Self::CloseTab | Self::Quit | Self::ToggleIgnoredFiles | Self::CollapseFolders => "",
+            Self::ToggleWordWrap => "Alt+Z",
+            Self::FindInDocument => "Ctrl+F",
+            Self::ReloadDocument => "F5",
+            Self::CloseTab
+            | Self::Quit
+            | Self::ToggleIgnoredFiles
+            | Self::CollapseFolders
+            | Self::ToggleMarkdownSource
+            | Self::OpenDocumentExternally => "",
         }
     }
 }
@@ -143,5 +162,10 @@ pub const PALETTE: &[Action] = &[
     Action::ShowPanel(Panel::Agents),
     Action::ShowPanel(Panel::Monitor),
     Action::OpenSettings,
+    Action::ToggleMarkdownSource,
+    Action::ToggleWordWrap,
+    Action::FindInDocument,
+    Action::ReloadDocument,
+    Action::OpenDocumentExternally,
     Action::Quit,
 ];

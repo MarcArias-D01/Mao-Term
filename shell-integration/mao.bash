@@ -1,5 +1,6 @@
 # Mao-Term shell integration for bash. Loaded with `bash --rcfile <this file>`.
-# Emits OSC 133 (prompt / command marks) and OSC 7 (current directory).
+# Emits OSC 133 (prompt / command marks) and OSC 7 (current directory),
+# and defines `mao open <file>` (OSC 7770) to show a file in Mao-Term's viewer.
 # See docs/specs/shell-integration.md. Status: untested on Linux.
 
 if [ -n "${__MAO_TERM-}" ]; then return; fi
@@ -37,3 +38,12 @@ __mao_wrap_ps1() {
 }
 
 PROMPT_COMMAND="__mao_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND};__mao_wrap_ps1"
+
+# `mao open <file>`: show a file in Mao-Term's document viewer.
+mao() {
+    if [ "${1-}" != open ] || [ -z "${2-}" ]; then echo 'usage: mao open <file>'; return 2; fi
+    if [ ! -e "$2" ]; then echo "mao: no such file: $2" >&2; return 1; fi
+    local dir
+    dir=$(cd -- "$(dirname -- "$2")" && pwd) || return 1
+    printf '\e]7770;open;file://%s%s\a' "${HOSTNAME-}" "$(__mao_urlencode "$dir/$(basename -- "$2")")"
+}
